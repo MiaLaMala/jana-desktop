@@ -283,6 +283,9 @@ uint32_t hinweisTippZeit = 0;
 
 bool themeGesicht = true;
 GesichtEinstellung gesichtEinst = {0x5E5F, true, true};  // #5ac8fa Hellblau
+// Feierabend-Zeitraum in vollen Stunden, von Mia in Mia OS gesetzt.
+int feierabendAb = 16;
+int feierabendBis = 7;
 // Ob die Augen gerade auf dem Panel stehen. Alles, was darueber malt
 // (Dialoge, Uebergaenge, andere Seiten), setzt das auf false, dann wird
 // beim naechsten Zeichnen der Grund geraeumt und das Gesicht neu gesetzt.
@@ -290,8 +293,60 @@ bool gesichtSteht = false;
 // Gemessen beim Start: Mikrosekunden fuer ein Bild beider Augen.
 uint32_t bildUs = 0;
 uint32_t startZeitpunkt = 0;
+Preferences merker;
+extern bool neuZeichnen;
 
 bool gesichtAktiv() { return themeGesicht && ansicht == 0; }
+
+/** Name der Augenfarbe aus Mia OS in RGB565. */
+uint16_t augenfarbe(const String &name) {
+  if (name == "gruen") return C_GUT;
+  if (name == "lila") return 0xB59F;
+  if (name == "rot") return C_AKZENT;
+  return 0x5E5F;  // hellblau
+}
+
+/**
+ * Einstellungen aus dem Briefing uebernehmen. Was sich geaendert hat, wird
+ * ins NVS geschrieben, damit es den naechsten Start ohne Server uebersteht.
+ * Bleibt alles gleich, wird nichts geschrieben: der Flash mag keine
+ * Schreibzugriffe im Zwei-Minuten-Takt.
+ */
+void geraetEinstellen(JsonObject g) {
+  if (g.isNull())
+    return;
+  const bool theme = String(g["theme"] | "gesicht") != "seiten";
+  GesichtEinstellung neu;
+  neu.farbe = augenfarbe(String(g["augenfarbe"] | "hellblau"));
+  neu.blinzeln = String(g["blinzeln"] | "1") == "1";
+  neu.umherschauen = String(g["umherschauen"] | "1") == "1";
+  const int ab = String(g["feierabend_ab"] | "16").toInt();
+  const int bis = String(g["feierabend_bis"] | "7").toInt();
+
+  const bool anders = theme != themeGesicht || neu.farbe != gesichtEinst.farbe ||
+                      neu.blinzeln != gesichtEinst.blinzeln ||
+                      neu.umherschauen != gesichtEinst.umherschauen || ab != feierabendAb ||
+                      bis != feierabendBis;
+  if (!anders)
+    return;
+  if (theme != themeGesicht)
+    gesichtSteht = false;
+  themeGesicht = theme;
+  gesichtEinst = neu;
+  feierabendAb = ab;
+  feierabendBis = bis;
+  gesichtEinstellen(gesichtEinst);
+  merker.begin("jana", false);
+  merker.putUChar("theme", themeGesicht ? 1 : 0);
+  merker.putUShort("augfarbe", gesichtEinst.farbe);
+  merker.putUChar("blinzeln", gesichtEinst.blinzeln ? 1 : 0);
+  merker.putUChar("schauen", gesichtEinst.umherschauen ? 1 : 0);
+  merker.putUChar("feierab", feierabendAb);
+  merker.putUChar("feierbis", feierabendBis);
+  merker.end();
+  Serial.println("[jana-display] Einstellungen von Mia OS uebernommen");
+  neuZeichnen = true;
+}
 
 /**
  * Vor einem Abruf: Pupillen nach oben rechts, wie jemand, der nachdenkt.
@@ -333,8 +388,6 @@ struct Update_t {
   String fehler;
 };
 Update_t neuling;
-
-Preferences merker;
 
 void updateBalkenZeichnen();
 void updateDialogZeichnen();
@@ -743,10 +796,13 @@ bool briefingHolen() {
   filter["hinweise"][0]["id"] = true;
   filter["hinweise"][0]["text"] = true;
   filter["hinweise"][0]["von"] = true;
+  filter["geraet"] = true;
 
   JsonDocument doc;
   if (!holen("/api/briefing", doc, filter))
     return false;
+
+  geraetEinstellen(doc["geraet"].as<JsonObject>());
 
   Briefing frisch;
   frisch.datum = doc["datum"].as<String>();
@@ -1663,12 +1719,11 @@ void gesichtSeiteZeichnen() {
   // Stimmung aus der Lage. Schreck und Zwinkern kommen von aussen, hier
   // wird nur der Grundzustand gesetzt.
   //
-  // Muede heisst vorerst: der Tag hatte Termine und sie sind vorbei, oder es
-  // ist Nacht. Den Feierabend-Zeitraum setzt Mia ab 0.2.x selbst in Mia OS.
-  const bool nacht = zeitDa && (jetzt.tm_hour >= NACHT_AB || jetzt.tm_hour < NACHT_BIS);
-  const bool tagVorbei = zeitDa && !laeuft && !naechste && briefing.heuteAnzahl > 0 &&
-                         jetzt.tm_hour >= 12;
-  gesichtZustand((nacht || tagVorbei) ? G_MUEDE : G_WACH);
+  // Muede im Feierabend-Zeitraum, den Mia in Mia OS setzt. Der Zeitraum
+  // geht ueber Mitternacht, deshalb "oder" statt "und".
+  const bool tagVorbei =
+      zeitDa && (jetzt.tm_hour >= feierabendAb || jetzt.tm_hour < feierabendBis);
+  gesichtZustand(tagVorbei ? G_MUEDE : G_WACH);
 
   if (!gesichtSteht) {
     tft.fillScreen(C_GRUND);
@@ -1713,6 +1768,8 @@ void gesichtSeiteZeichnen() {
     satz = naechste->titel + " in " + alsDauer(naechste->beginnMin - jetztMin) + ".";
     klein = "um " + naechste->zeit;
   } else if (zeitDa) {
+    // Nichts laeuft, nichts kommt mehr. Im Feierabend-Zeitraum heisst das
+    // Feierabend, davor einfach ein freier Rest des Tages.
     satz = tagVorbei ? "Feierabend." : "Nichts mehr heute.";
     const Termin *morgen = nullptr;
     for (int i = 0; i < briefing.morgenAnzahl; i++) {
@@ -1932,16 +1989,6 @@ int wischen() {
         return 0;
       }
     }
-  }
-
-  // Drei Sekunden auf die unterste Zeile: Theme wechseln. Kuerzer als die
-  // sechs Sekunden fuer das Setup, und die Zeile ist in beiden Themes
-  // nur Kleingedrucktes.
-  if (lag_an && ansicht == 0 && !neuling.gefragt && briefing.hinweiseAnzahl == 0 &&
-      startY >= 200 && millis() - startZeit > 3000) {
-    lag_an = false;
-    halteZiel = 3;
-    return 0;
   }
 
   // Langer Druck oeffnet die Einrichtung. Ohne das kommt man an die
@@ -2213,6 +2260,8 @@ void setup() {
   gesichtEinst.farbe = merker.getUShort("augfarbe", 0x5E5F);
   gesichtEinst.blinzeln = merker.getUChar("blinzeln", 1) == 1;
   gesichtEinst.umherschauen = merker.getUChar("schauen", 1) == 1;
+  feierabendAb = merker.getUChar("feierab", 16);
+  feierabendBis = merker.getUChar("feierbis", 7);
   merker.end();
   if (gesichtStart(gesichtEinst)) {
     bildUs = gesichtMessen(60);
@@ -2386,16 +2435,6 @@ void loop() {
       gesichtZwinkern();
       briefingHolen();
     }
-    neuZeichnen = true;
-  } else if (halteZiel == 3) {
-    // Theme wechseln und merken. Bis Mia OS das einstellt (0.2.x), ist das
-    // der einzige Schalter.
-    themeGesicht = !themeGesicht;
-    merker.begin("jana", false);
-    merker.putUChar("theme", themeGesicht ? 1 : 0);
-    merker.end();
-    gesichtSteht = false;
-    uebergang(1);
     neuZeichnen = true;
   }
 
