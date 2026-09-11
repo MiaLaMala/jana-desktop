@@ -92,6 +92,44 @@ jobs:
             display/.pio/build/cyd/firmware.elf
           retention-days: 90
 
+      # Die gebaute Datei kommt in einen eigenen Zweig, der nur sie enthaelt.
+      #
+      # Warum nicht einfach der Release: Release-Dateien haengen an der
+      # GitHub-API und brauchen ein Token. Ein Zweig kommt ueber SSH, und
+      # dafuer hat Mia OS bereits einen Deploy-Key, der nur lesen darf.
+      # Ein Token weniger, das irgendwo liegen und ablaufen kann.
+      - name: Firmware in den Zweig legen
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        run: |
+          BIN=display/.pio/build/cyd/firmware.bin
+          PRUEF=$(sha256sum "$BIN" | cut -d' ' -f1)
+          GROESSE=$(stat -c%s "$BIN")
+
+          rm -rf /tmp/zweig && mkdir /tmp/zweig
+          cp "$BIN" /tmp/zweig/firmware.bin
+          cat > /tmp/zweig/firmware.json <<ENDE
+          {
+            "version": "${{ env.version }}",
+            "groesse": $GROESSE,
+            "sha256": "$PRUEF",
+            "commit": "${{ github.sha }}",
+            "gebaut_am": "$(date -Is)"
+          }
+          ENDE
+
+          cd /tmp/zweig
+          git init -q
+          git config user.name "Mia Grünwald"
+          git config user.email "mia_gruenwald08@outlook.de"
+          git add -A
+          git commit -q -m "Firmware ${{ env.version }}"
+          # Der Zweig hat bewusst keine Historie: er traegt immer nur die
+          # aktuelle Datei. Sonst waechst das Repo mit jedem Bau um 1,1 MB.
+          git push -q --force \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            HEAD:firmware
+          echo "Firmware $PRUEF ($GROESSE Bytes) im Zweig 'firmware'"
+
       # Auf main entsteht ein Release. Damit hat jede Fassung, die am
       # Display landen koennte, eine Nummer und eine feste Adresse.
       - name: Release anlegen
