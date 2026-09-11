@@ -18,6 +18,11 @@ on:
       - 'display/**'
   workflow_dispatch:
 
+# Ohne das darf der Standard-Token keinen Release anlegen: GitHub gibt
+# Workflows seit 2023 nur Leserechte, und der Schritt scheitert mit 403.
+permissions:
+  contents: write
+
 jobs:
   bauen:
     runs-on: ubuntu-latest
