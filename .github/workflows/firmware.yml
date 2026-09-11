@@ -1,0 +1,99 @@
+name: Firmware
+
+# Baut die Firmware bei jedem Push und haengt sie an einen Release.
+#
+# Warum nur bauen und nicht flashen: Der GitHub-Runner steht in der Cloud,
+# das Display haengt per USB an Mias Mac. Ein Runner kann kein Kabel.
+# Das Flashen bleibt deshalb ein Handgriff am Mac, aber die gebaute Datei
+# kommt aus dem CI und nicht von "hat bei mir funktioniert".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'display/**'
+      - '.github/workflows/firmware.yml'
+  pull_request:
+    paths:
+      - 'display/**'
+  workflow_dispatch:
+
+jobs:
+  bauen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Der Ordner .pio/libdeps macht den Build sonst jedes Mal langsam,
+      # weil TFT_eSPI und WiFiManager frisch aus Git geholt werden.
+      - name: Abhaengigkeiten aus dem Zwischenspeicher
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            display/.pio
+          key: pio-${{ hashFiles('display/platformio.ini') }}
+          restore-keys: pio-
+
+      - name: PlatformIO installieren
+        run: pip install --upgrade platformio
+
+      - name: Bauen
+        working-directory: display
+        run: pio run
+
+      # Die Groesse ist der Punkt, an dem dieses Projekt irgendwann anschlaegt:
+      # der Flash war am 11.09.2026 schon zu 84,7 Prozent voll. Lieber hier
+      # rot werden als beim Flashen am Mac.
+      - name: Platz im Flash pruefen
+        working-directory: display
+        run: |
+          pio run --target size 2>&1 | tee groesse.txt
+          BYTES=$(grep -oP 'Flash:.*used \K[0-9]+' groesse.txt | head -1)
+          MAX=$(grep -oP 'Flash:.*from \K[0-9]+' groesse.txt | head -1)
+          PROZENT=$(( BYTES * 100 / MAX ))
+          echo "Flash: $PROZENT Prozent ($BYTES von $MAX Bytes)"
+          echo "flash_prozent=$PROZENT" >> "$GITHUB_ENV"
+          if [ "$PROZENT" -ge 95 ]; then
+            echo "::error::Flash zu $PROZENT Prozent voll. Das wird beim naechsten Feature eng."
+            exit 1
+          elif [ "$PROZENT" -ge 90 ]; then
+            echo "::warning::Flash zu $PROZENT Prozent voll."
+          fi
+
+      - name: Firmware ablegen
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            display/.pio/build/cyd/firmware.bin
+            display/.pio/build/cyd/firmware.elf
+          retention-days: 90
+
+      # Auf main entsteht ein Release. Damit hat jede Fassung, die am
+      # Display landen koennte, eine Nummer und eine feste Adresse.
+      - name: Release anlegen
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: bau-${{ github.run_number }}
+          name: Bau ${{ github.run_number }}
+          body: |
+            Firmware fuer das Jana-Display (ESP32-2432S028).
+
+            Flash: ${{ env.flash_prozent }} Prozent belegt.
+            Commit: ${{ github.sha }}
+
+            Flashen am Mac:
+            ```bash
+            cd ~/projekte/jana-desktop/display
+            git pull
+            pio run -t upload
+            ```
+          files: display/.pio/build/cyd/firmware.bin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,24 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Gebaute Firmware gehoert an den Release, nicht ins Repo
+*.bin
+*.elf
+*.hex
+
+# Zugangsdaten haben hier nichts verloren. Das Display fragt sie beim
+# ersten Start selbst ab, genau damit kein WLAN-Passwort im Quelltext steht.
+secrets.h
+*.env
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+.venv/
