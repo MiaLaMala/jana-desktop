@@ -137,7 +137,10 @@ TFT_eSPI tft = TFT_eSPI();
 SPIClass touchSPI(VSPI);
 XPT2046_Touchscreen touch(TOUCH_CS, TOUCH_IRQ);
 
-char basisUrl[80] = "http://172.16.30.230:8080";
+// Vorgabe, die beim ersten Start im Einrichtungsportal ueberschrieben wird.
+// Bewusst eine Beispieladresse: die echte gehoert in kein Repository, und
+// wer das Projekt nachbaut, hat ohnehin eine andere.
+char basisUrl[80] = "http://mia-os.local:8080";
 
 struct Termin {
   String titel;
@@ -1433,6 +1436,7 @@ void setup() {
   neuling.abgelehnt = merker.getString("abgelehnt", "");
   merker.end();
 
+  // Gleich beim Start nachsehen, nicht erst beim naechsten Abruf.
   updatePruefen();
   neuZeichnen = true;
 }
@@ -1497,8 +1501,9 @@ void loop() {
     // Geraet gibt und welche Fassung laeuft.
     updatePruefen();
     // Auch bei Misserfolg neu zeichnen: der Punkt oben rechts und das
-    // "vor X min" sind dann die eigentliche Information.
-    neuZeichnen = true;
+    // "vor X min" sind dann die eigentliche Information. Nur nicht, solange
+    // der Update-Dialog steht, sonst ist er nach zwei Minuten weg.
+    neuZeichnen = !neuling.gefragt;
     if (stoerungAktiv() != stoerungVorher)
       Serial.printf("[jana-display] Homelab: %d von %d\n", homelab.oben, homelab.gesamt);
   }
@@ -1510,7 +1515,9 @@ void loop() {
   const int jetzt = jetztMinuten();
   if (jetzt != letzteMinute) {
     letzteMinute = jetzt;
-    if (ansicht == 0)
+    // Nicht neu zeichnen, solange der Dialog steht: die tickende Uhr haette
+    // ihn sonst jede Minute uebermalt.
+    if (ansicht == 0 && !neuling.gefragt)
       neuZeichnen = true;
   }
 
@@ -1532,9 +1539,17 @@ void loop() {
       updateDialogZeichnen();
   }
 
-  // Fragen, wenn etwas bereitsteht und gerade nichts dagegen spricht.
-  const bool ruhe = !stoerungAktiv() && laeuftGerade() == nullptr;
-  if (!neuling.gefragt && !neuling.version.isEmpty() && ruhe &&
+  // Fragen, sobald etwas bereitsteht.
+  //
+  // Hier stand einmal eine Bedingung "nur wenn gerade nichts laeuft": keine
+  // Stoerung im Homelab und kein laufender Termin. Gut gemeint, in der Praxis
+  // eine Sperre, die nie aufgeht. Mias Arbeitstag ist von 7:30 bis 16:45
+  // lueckenlos mit Terminen belegt, und ein Dienst ist fast immer unten.
+  // Der Dialog erschien deshalb kein einziges Mal.
+  //
+  // Die Unterbrechung regelt ohnehin der Knopf "Spaeter". Wer entscheidet,
+  // ob gerade ein guter Moment ist, ist Mia und nicht das Geraet.
+  if (!neuling.gefragt && !neuling.version.isEmpty() &&
       millis() > neuling.spaeterBis) {
     neuling.gefragt = true;
     updateDialogZeichnen();

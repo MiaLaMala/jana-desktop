@@ -25,16 +25,17 @@ es ist. Der Release-Tag heißt `v0.1.7`, genau wie bei Mia OS.
 
 ---
 
-## Das Problem: ein privates Repo braucht einen Schlüssel
+## Warum der Server dazwischen steht
 
-Die Firmware liegt als Release im privaten Repo `MiaLaMala/jana-desktop`.
-Ein Download braucht deshalb ein Token.
+Naheliegend wäre, das Gerät direkt bei GitHub nachfragen zu lassen. Solange
+das Repository privat ist, braucht das ein Token, und **ein Token gehört
+nicht in die Firmware**: Ein ESP32 ist ein Bauteil auf dem Schreibtisch, wer
+ihn mitnimmt liest den Flash aus. Dazu kommt, dass sich ein fest
+eingebrannter Wert nur wechseln lässt, indem man genau das Gerät flasht, das
+man gerade aus der Ferne erreichen wollte.
 
-**Das Token darf nicht in die Firmware.** Ein ESP32 ist ein Bauteil auf dem
-Schreibtisch. Wer ihn mitnimmt, liest den Flash aus, und ein
-Repository-Token gilt für alle Repositories. Dazu kommt: Ein Wert, der fest
-im Quelltext steht, lässt sich nicht wechseln, ohne genau das Gerät zu
-flashen, das man gerade aus der Ferne erreichen wollte.
+Auch bei einem öffentlichen Repository bleibt der Umweg sinnvoll: Das Gerät
+kennt dann nur eine Adresse im eigenen Netz und muss nicht ins Internet.
 
 ## Die Lösung: Mia OS steht dazwischen
 
@@ -133,8 +134,18 @@ Danach läuft alles Weitere ohne Kabel.
 
 ---
 
-## Was noch fehlt
+## Stand
 
-Ein **Deploy-Key** für `jana-desktop` auf dem Mia-OS-Container. Für
-`mia-os` gibt es so einen Schlüssel bereits, das Muster steht also. Den
-legt Mia selbst an, Zugangsdaten macht sie nicht über Dritte.
+Gebaut und in Betrieb seit dem 11.09.2026. Die Kette läuft vom Push bis zum
+Gerät durch: CI baut, legt die Firmware in den Zweig `firmware`, der Server
+holt sie, das Display fragt beim Termin-Abruf mit und meldet sich dabei
+selbst an.
+
+Vom Push bis zum Dialog vergehen bis zu zwölf Minuten: neunzig Sekunden für
+den Bau, dazu der Zwischenspeicher des Servers von zehn Minuten und der
+Abruf des Geräts alle zwei Minuten.
+
+**Noch nicht bewiesen:** der Rückfall auf die vorherige Fassung. Der Code
+ist da und die Probezeit greift, aber es wurde nie absichtlich eine kaputte
+Fassung eingespielt, um zuzusehen, ob das Gerät zurückspringt. Bis das
+einmal passiert ist, gilt der Rückfall als ungetestet.

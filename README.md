@@ -7,16 +7,23 @@ Zwei Geräte, die dieselben Daten zeigen, und ein Server, der sie hat.
 | `display/` | Tischdisplay auf dem ESP32-2432S028, zeigt Termine und Homelab | läuft |
 | `assistent/` | Sprachassistent auf dem Pi Zero 2 W, BBW-Projektarbeit | im Bau |
 
-Beide reden mit **Mia OS** auf `172.16.30.230:8080`. Mia OS ist bewusst nicht
-aus dem Internet erreichbar, deshalb funktioniert hier nichts ohne Heimnetz
-oder Tunnel.
+Beide reden mit **Mia OS**, einer selbstgebauten persönlichen Zentrale im
+eigenen Netz. Sie ist bewusst nicht aus dem Internet erreichbar, deshalb
+funktioniert hier nichts ohne Heimnetz oder Tunnel. Die Adresse stellt man
+beim ersten Start im Einrichtungsportal ein, sie steht nicht im Quelltext.
+
+Das hier ist ein Einzelstück für einen Schreibtisch, kein Produkt. Öffentlich
+ist es, weil die Fallstricke weiter unten schwer zu finden waren: wer nach
+„ESP32-2432S028 Touch reagiert nicht" sucht, soll nicht dieselben Abende
+verlieren.
 
 ---
 
 ## Display
 
 ESP32-2432S028, im Netz als „Cheap Yellow Display" bekannt. 2,8 Zoll,
-320 x 240 im Querformat, resistiver Touch.
+320 x 240 im Querformat, resistiver Touch. Kostet um die 12 Euro und bringt
+Display, Touch, WLAN und Netzteilanschluss auf einer Platine mit.
 
 Vier Seiten: Jetzt, Heute, Morgen, Homelab. Gewechselt wird durch Tippen
 links oder rechts, durch Tippen auf die Punkte oben rechts, oder durch
@@ -30,9 +37,23 @@ pio run              # bauen
 pio run -t upload    # flashen, Board muss per USB dranhängen
 ```
 
-Auf Mias Mac liegt das Projekt unter `~/projekte/jana-desktop/`, der Port
-ist `/dev/cu.usbserial-110`. PlatformIO liegt dort in
-`~/Library/Python/3.9/bin` und ist nicht im Standard-PATH.
+Der serielle Port heißt auf macOS meist `/dev/cu.usbserial-*`, unter Linux
+`/dev/ttyUSB0`. PlatformIO findet ihn von selbst, solange nur ein Board
+angeschlossen ist.
+
+### Updates über die Luft
+
+Das Gerät fragt den Server, ob eine neuere Fassung bereitsteht, und zeigt
+einen Dialog mit alter und neuer Nummer. Erst auf „Ja" lädt und flasht es
+sich selbst.
+
+Geschrieben wird in den unbenutzten der beiden Programmplätze, der laufende
+bleibt unangetastet. Die neue Fassung gilt als auf Probe, bis sie einmal
+hochgekommen ist und den Server erreicht hat. Bleibt das aus, fällt das
+Gerät beim nächsten Neustart von selbst zurück.
+
+Ausführlich in `display/OTA-ENTWURF.md`, samt der Stelle, die noch nicht
+bewiesen ist.
 
 ### Fallstricke, die Zeit gekostet haben
 
@@ -116,6 +137,13 @@ voll der Flash ist und hängt das Ergebnis an einen Release.
 Board hängt per USB an Mias Mac, und ein Runner kann kein Kabel. Aus dem CI
 kommt eine gebaute, nummerierte Datei, das Aufspielen bleibt ein Handgriff.
 
-Der Flash war am 11.09.2026 zu 84,7 Prozent belegt. Der Workflow warnt ab
-90 Prozent und bricht ab 95 Prozent ab, damit das nicht erst beim Flashen
-auffällt.
+Der Flash war vor dem Wechsel auf `min_spiffs.csv` zu 84,7 Prozent belegt,
+danach zu 56,9. Der Workflow warnt ab 90 Prozent und bricht ab 95 Prozent
+ab, damit das nicht erst beim Flashen auffällt.
+
+**Geflasht wird über die Luft, nicht aus der CI.** Ein Runner in der Cloud
+kommt nicht ins Heimnetz, und das soll er auch nicht.
+
+## Lizenz
+
+MIT, siehe `LICENSE`.
