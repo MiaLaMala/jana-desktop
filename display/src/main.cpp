@@ -298,6 +298,19 @@ extern bool neuZeichnen;
 
 bool gesichtAktiv() { return themeGesicht && ansicht == 0; }
 
+// Der Stand der Einstellungen, den Mia OS zuletzt gemeldet hat. Ein
+// eigener Task haelt dauerhaft eine Anfrage offen; der Server antwortet in
+// dem Moment, in dem Mia etwas speichert. So wirkt eine Aenderung in unter
+// einer Sekunde statt beim naechsten Zwei-Minuten-Abruf. Der Server kann
+// das Geraet nicht selbst anrufen: es steht hinter dem NAT des Pi.
+volatile int einstellungsStand = 0;
+// Uebergabe vom Warte-Task an loop(): der Task parst, loop() uebernimmt.
+// Beide fassen die Anzeige an, deshalb laeuft das Uebernehmen in loop().
+JsonDocument wartendeEinstellung;
+volatile bool einstellungWartet = false;
+
+void geraetEinstellen(JsonObject g);
+
 /** Name der Augenfarbe aus Mia OS in RGB565. */
 uint16_t augenfarbe(const String &name) {
   if (name == "gruen") return C_GUT;
@@ -329,8 +342,10 @@ void geraetEinstellen(JsonObject g) {
                       bis != feierabendBis;
   if (!anders)
     return;
-  if (theme != themeGesicht)
+  if (theme != themeGesicht) {
     gesichtSteht = false;
+    ansicht = 0;
+  }
   themeGesicht = theme;
   gesichtEinst = neu;
   feierabendAb = ab;
@@ -388,6 +403,41 @@ struct Update_t {
   String fehler;
 };
 Update_t neuling;
+
+void einstellungenWarten(void *) {
+  for (;;) {
+    if (WiFi.status() != WL_CONNECTED || neuling.laeuft || einstellungWartet) {
+      delay(1000);
+      continue;
+    }
+    HTTPClient http;
+    http.setTimeout(70000);
+    http.setConnectTimeout(5000);
+    const String pfad = String(basisUrl) + "/api/geraete/einstellungen?warten=55&seit=" +
+                        String(einstellungsStand);
+    if (!http.begin(pfad)) {
+      delay(5000);
+      continue;
+    }
+    const int code = http.GET();
+    if (code == 200) {
+      JsonDocument doc;
+      if (!deserializeJson(doc, http.getStream())) {
+        const int stand = doc["stand"] | 0;
+        if (stand != einstellungsStand) {
+          einstellungsStand = stand;
+          wartendeEinstellung = doc["geraet"];
+          einstellungWartet = true;
+        }
+      }
+      http.end();
+    } else {
+      http.end();
+      delay(5000);  // Server weg: nicht im Kreis haemmern
+    }
+  }
+}
+
 
 void updateBalkenZeichnen();
 void updateDialogZeichnen();
@@ -2080,7 +2130,8 @@ int wischen() {
         neuZeichnen = true;
         if (eier.raphStufe >= 4) {
           // Extracted: auf die Homelab-Seite verlegt, egal wo man war.
-          tippZiel = 3;
+          if (!themeGesicht)
+            tippZiel = 3;
           eier.raphStufe = 0;
         }
         return 0;
@@ -2155,6 +2206,8 @@ int wischen() {
     }
     // Linkes Viertel zurueck, rechtes Viertel vor. Auf einem resistiven
     // Panel trifft ein Tippen zuverlaessiger als ein Wisch.
+    if (themeGesicht)
+      return 0;
     if (startX < BREIT / 4)
       return -1;
     if (startX > BREIT * 3 / 4)
@@ -2365,6 +2418,10 @@ void setup() {
 
   regelnHolen();
 
+  // Der Warte-Task fuer Einstellungen, auf dem zweiten Kern, damit er
+  // die Augen nicht bremst. 8 KB Stapel reichen fuer HTTP plus JSON.
+  xTaskCreatePinnedToCore(einstellungenWarten, "einst", 8192, nullptr, 1, nullptr, 0);
+
   // Gleich beim Start nachsehen, nicht erst beim naechsten Abruf.
   updatePruefen();
   neuZeichnen = true;
@@ -2372,6 +2429,12 @@ void setup() {
 
 void loop() {
   const int wisch = wischen();
+
+  // Was der Warte-Task hereingeholt hat, sofort uebernehmen.
+  if (einstellungWartet) {
+    geraetEinstellen(wartendeEinstellung.as<JsonObject>());
+    einstellungWartet = false;
+  }
 
   // Der Dialog hat Vorrang: solange er steht, wird nicht geblaettert.
   if (antwort != 0) {
@@ -2486,6 +2549,18 @@ void loop() {
     merker.putUInt("doah", doah);
     merker.end();
     neuZeichnen = true;
+  } else if (wisch != 0 && themeGesicht) {
+    // Im Gesicht gibt es keine Seiten. Jana steht auf dem Tisch, und wer
+    // an ihr wischt, wischt an ihr. Die Schere bleibt (Regel bleibt Regel).
+    static uint32_t letzterWischG = 0;
+    static int wischSerieG = 0;
+    wischSerieG = (millis() - letzterWischG < 900) ? wischSerieG + 1 : 1;
+    letzterWischG = millis();
+    if (wischSerieG >= 3 && laeuftGerade()) {
+      eier.schereBis = millis() + 5000;
+      wischSerieG = 0;
+      neuZeichnen = true;
+    }
   } else if (wisch != 0) {
     // Dreimal schnell hin und her waehrend ein Termin laeuft: Schere.
     static uint32_t letzterWisch = 0;
@@ -2501,7 +2576,7 @@ void loop() {
     }
     uebergang(wisch);
     neuZeichnen = true;
-  } else if (tippZiel >= 0 && tippZiel != ansicht) {
+  } else if (tippZiel >= 0 && tippZiel != ansicht && (!themeGesicht || tippZiel == KAMMER)) {
     uebergang(tippZiel > ansicht ? 1 : -1);
     ansicht = tippZiel;
     neuZeichnen = true;
