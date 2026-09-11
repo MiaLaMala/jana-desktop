@@ -69,6 +69,7 @@
 
 #include "schriften.h"
 #include "sprites.h"
+#include "gesicht.h"
 #include <ESP32Ping.h>
 
 // --- Farben nach DESIGN.md ------------------------------------------------
@@ -272,6 +273,41 @@ int regelnAnzahl = 0;
 int hinweisTipps = 0;         // wie oft auf denselben Knopf getippt (Regel 39)
 int hinweisKnopf = 0;         // 1 ok, 2 spaeter
 uint32_t hinweisTippZeit = 0;
+
+// --- Das Gesicht ----------------------------------------------------------
+//
+// Seit 0.2.0 gibt es zwei Themes in einer Firmware. "Seiten" ist der Stand
+// 0.1.10: Kopfzeile, Uhr, Kaesten. "Gesicht" ersetzt die erste Seite durch
+// zwei Augen und einen Satz; Heute, Morgen und Homelab bleiben per Wischen
+// erreichbar. Die Einstellungen liegen im NVS und kommen ab 0.2.x von Mia OS.
+
+bool themeGesicht = true;
+GesichtEinstellung gesichtEinst = {0x5E5F, true, true};  // #5ac8fa Hellblau
+// Ob die Augen gerade auf dem Panel stehen. Alles, was darueber malt
+// (Dialoge, Uebergaenge, andere Seiten), setzt das auf false, dann wird
+// beim naechsten Zeichnen der Grund geraeumt und das Gesicht neu gesetzt.
+bool gesichtSteht = false;
+// Gemessen beim Start: Mikrosekunden fuer ein Bild beider Augen.
+uint32_t bildUs = 0;
+uint32_t startZeitpunkt = 0;
+
+bool gesichtAktiv() { return themeGesicht && ansicht == 0; }
+
+/**
+ * Vor einem Abruf: Pupillen nach oben rechts, wie jemand, der nachdenkt.
+ * Ersetzt den Ladebalken. Die 360 ms sind die Zeit, die die Pupille fuer
+ * den Weg braucht; der Abruf selbst blockiert danach ohnehin.
+ */
+void gesichtDenken() {
+  if (!gesichtAktiv() || !gesichtSteht)
+    return;
+  gesichtZustand(G_DENKEN);
+  const uint32_t bis = millis() + 360;
+  while (millis() < bis) {
+    gesichtTakt();
+    delay(15);
+  }
+}
 
 // --- Updates ueber die Luft -----------------------------------------------
 //
@@ -1397,6 +1433,7 @@ const int DLG_K1 = DLG_X + 14, DLG_K2 = DLG_K1 + DLG_KB + DLG_ABSTAND,
 void updateDialogZeichnen() {
   // Schatten als Andeutung von Hoehe, damit der Kasten nicht wie ein
   // Teil der Seite aussieht.
+  gesichtSteht = false;
   tft.fillRoundRect(DLG_X + 3, DLG_Y + 3, DLG_B, DLG_H, 10, C_GRUND);
   tft.fillRoundRect(DLG_X, DLG_Y, DLG_B, DLG_H, 10, C_ERHOBEN);
   tft.drawRoundRect(DLG_X, DLG_Y, DLG_B, DLG_H, 10, C_AKZENT);
@@ -1454,6 +1491,7 @@ const int HW_K1 = HW_X + 12, HW_K2 = HW_K1 + HW_KB + 12;
  * Regel 39: Hall of Fame oder Hall of Shame.
  */
 void hinweisZeichnen() {
+  gesichtSteht = false;
   tft.fillRoundRect(HW_X + 3, HW_Y + 3, HW_B, HW_H, 10, C_GRUND);
   tft.fillRoundRect(HW_X, HW_Y, HW_B, HW_H, 10, C_ERHOBEN);
   tft.drawRoundRect(HW_X, HW_Y, HW_B, HW_H, 10, C_KAL_PRIVAT);
@@ -1510,6 +1548,7 @@ void hinweisZeichnen() {
  * naechste.
  */
 void kammerZeichnen() {
+  gesichtSteht = false;
   tft.fillScreen(TFT_BLACK);
   tft.setFreeFont(S_FETT);
   tft.setTextDatum(TC_DATUM);
@@ -1581,7 +1620,8 @@ void zugZeichnen() {
     return;
   const uint32_t weg = millis() - eier.zugStart;
   const int x = BREIT - (int)(weg / 12);  // 12 ms je Pixel, ~4 s ueber das Bild
-  const int y = FUSS_Y - 10;
+  // Im Gesicht-Theme faehrt er unter den Augen durch, nicht durch die Uhr.
+  const int y = gesichtAktiv() ? AUGE_UNTEN + 1 : FUSS_Y - 10;
   // Spur freimachen, wo der Zug gerade war.
   tft.fillRect(x + 22, y, 6, 8, C_GRUND);
   if (x < -30) {
@@ -1599,12 +1639,133 @@ void zugZeichnen() {
   tft.drawPixel(x + 24, y + 8, C_TEXT);
 }
 
+/**
+ * Die Gesichtsseite: Augen oben, darunter ein Satz, eine Zeile Kleingedrucktes
+ * und die Uhr. Keine Kopfzeile, keine Kaesten. Das Gesicht ist Jana auf dem
+ * Tisch; die Zahlen stehen auf den anderen Seiten.
+ *
+ * Die Augen werden nur neu gesetzt, wenn sie nicht mehr stehen (nach einem
+ * Dialog, einer anderen Seite, einem Uebergang). Sonst wird nur der Text
+ * darunter neu geschrieben, und die Augen bewegen sich ungestoert weiter.
+ */
+const int SATZ_Y = 138;
+
+void gesichtSeiteZeichnen() {
+  struct tm jetzt;
+  const bool zeitDa = getLocalTime(&jetzt, 50);
+  const int jetztMin = jetztMinuten();
+  const Termin *laeuft = laeuftGerade();
+  const Termin *naechste = kommtAlsNaechstes();
+
+  // Stimmung aus der Lage. Schreck und Zwinkern kommen von aussen, hier
+  // wird nur der Grundzustand gesetzt.
+  //
+  // Muede heisst vorerst: der Tag hatte Termine und sie sind vorbei, oder es
+  // ist Nacht. Den Feierabend-Zeitraum setzt Mia ab 0.2.x selbst in Mia OS.
+  const bool nacht = zeitDa && (jetzt.tm_hour >= NACHT_AB || jetzt.tm_hour < NACHT_BIS);
+  const bool tagVorbei = zeitDa && !laeuft && !naechste && briefing.heuteAnzahl > 0 &&
+                         jetzt.tm_hour >= 12;
+  gesichtZustand((nacht || tagVorbei) ? G_MUEDE : G_WACH);
+
+  if (!gesichtSteht) {
+    tft.fillScreen(C_GRUND);
+    gesichtZeichnen();
+    gesichtSteht = true;
+  } else {
+    tft.fillRect(0, AUGE_UNTEN + 2, BREIT, HOCH - AUGE_UNTEN - 2, C_GRUND);
+  }
+
+  if (eier.stein) {
+    // Gesteinigt: der Stein liegt auf beiden Augen. Bleibt bis zur naechsten
+    // Beruehrung, wie auf der Uhr im Seiten-Theme.
+    tft.setSwapBytes(true);
+    tft.pushImage(AUGE_L_X + (AUGE_B - SPRITE_B) / 2, AUGE_Y + 16, SPRITE_B, SPRITE_B, SPRITE_STEIN);
+    tft.pushImage(AUGE_R_X + (AUGE_B - SPRITE_B) / 2, AUGE_Y + 16, SPRITE_B, SPRITE_B, SPRITE_STEIN);
+    // Faellt der Stein ab, muessen die Augen darunter neu gesetzt werden.
+    gesichtSteht = false;
+  }
+
+  String satz, klein;
+  uint16_t satzFarbe = C_TEXT;
+  if (!habenDaten) {
+    switch (lage) {
+    case LAGE_KEIN_WLAN: satz = "Kein WLAN."; klein = "Pi aus oder zu weit weg"; break;
+    case LAGE_KEIN_TUNNEL: satz = "Tunnel weg."; klein = "Firmennetz. Warten."; break;
+    case LAGE_KEIN_SERVER: satz = "Mia OS antwortet nicht."; klein = "Tunnel steht, Server nicht"; break;
+    default: satz = "Keine Verbindung."; klein = letzterFehler; break;
+    }
+    satzFarbe = C_GEDAEMPFT;
+  } else if (stoerungAktiv() && homelab.stoerAnzahl > 0) {
+    // Eine Stoerung ist wichtig genug fuer den Satz. Der Rest steht auf
+    // der Homelab-Seite.
+    satz = homelab.stoerung[0] + (homelab.stoerAnzahl > 1 ? " und mehr sind weg." : " ist weg.");
+    klein = String(homelab.oben) + " von " + String(homelab.gesamt);
+    satzFarbe = C_ACHTUNG;
+  } else if (laeuft) {
+    satz = laeuft->titel + ". Noch " + alsDauer(laeuft->endeMin - jetztMin) + ".";
+    klein = "bis " + laeuft->ende;
+    if (naechste)
+      klein += "  ·  dann " + naechste->titel;
+  } else if (naechste) {
+    satz = naechste->titel + " in " + alsDauer(naechste->beginnMin - jetztMin) + ".";
+    klein = "um " + naechste->zeit;
+  } else if (zeitDa) {
+    satz = tagVorbei ? "Feierabend." : "Nichts mehr heute.";
+    const Termin *morgen = nullptr;
+    for (int i = 0; i < briefing.morgenAnzahl; i++) {
+      const Termin &t = briefing.morgen[i];
+      if (t.beginnMin >= 0 && (!morgen || t.beginnMin < morgen->beginnMin))
+        morgen = &t;
+    }
+    if (morgen)
+      klein = "morgen " + morgen->zeit + "  " + morgen->titel;
+  } else {
+    satz = "Warte auf die Uhrzeit.";
+  }
+  if (briefing.faelligAnzahl > 0 && habenDaten) {
+    if (klein.length())
+      klein += "  ·  ";
+    klein += String(briefing.faelligAnzahl) + " fällig";
+  }
+  if (millis() < eier.schereBis)
+    satz = "ey schere.";
+
+  tft.setTextDatum(TC_DATUM);
+  tft.setFreeFont(S_GROSS);
+  tft.setTextColor(satzFarbe, C_GRUND);
+  tft.drawString(passend(satz, BREIT - 24), BREIT / 2, SATZ_Y);
+  tft.setFreeFont(S_NORMAL);
+  tft.setTextColor(C_GEDAEMPFT, C_GRUND);
+  tft.drawString(passend(klein, BREIT - 24), BREIT / 2, SATZ_Y + 30);
+
+  // Unten klein die Uhr, links der Daten-Punkt, rechts der Zaehler.
+  char uhr[6] = "--:--";
+  if (zeitDa)
+    strftime(uhr, sizeof(uhr), "%H:%M", &jetzt);
+  tft.setFreeFont(S_KLEIN);
+  tft.setTextColor(istSiebenundsechzig(uhr) ? C_AKZENT : C_LINIE, C_GRUND);
+  tft.drawString(uhr, BREIT / 2, 216);
+  uint16_t punkt = C_FEHLER;
+  if (habenDaten)
+    punkt = (millis() - letzterErfolg) < VERALTET_MS ? C_LINIE : C_ACHTUNG;
+  tft.fillCircle(12, 222, 3, punkt);
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(C_LINIE, C_GRUND);
+  tft.drawString(doah > 0 ? "DOAH " + String(doah) : "", BREIT - 12, 216);
+}
+
 /** Die ganze Anzeige. Wird nur bei Aenderung gezeichnet, nicht im Takt. */
 void anzeigeZeichnen() {
   if (ansicht == KAMMER) {
+    gesichtSteht = false;
     kammerZeichnen();
     return;
   }
+  if (gesichtAktiv()) {
+    gesichtSeiteZeichnen();
+    return;
+  }
+  gesichtSteht = false;
   tft.fillScreen(C_GRUND);
   kopfZeichnen();
 
@@ -1748,8 +1909,12 @@ int wischen() {
   // noch liegt. Zehn Sekunden auf die Uhr: Stein. Zwei Sekunden auf eine
   // faellige Aufgabe: erledigt. Beides laenger als ein Wisch, kuerzer als
   // die sechs Sekunden fuer das Setup, damit sich nichts ueberschneidet.
-  if (lag_an && ansicht == 0 && !neuling.gefragt && startX < 150 && startY > KOPF_H &&
-      startY < 120 && millis() - startZeit > 10000) {
+  // Im Gesicht-Theme liegt der Stein auf den Augen statt auf der Uhr.
+  const bool aufDerUhr =
+      ansicht == 0 && (gesichtAktiv() ? (startY >= AUGE_Y && startY < AUGE_UNTEN &&
+                                         startX >= AUGE_L_X && startX < AUGE_R_X + AUGE_B)
+                                      : (startX < 150 && startY > KOPF_H && startY < 120));
+  if (lag_an && aufDerUhr && !neuling.gefragt && millis() - startZeit > 10000) {
     lag_an = false;
     halteZiel = 1;
     return 0;
@@ -1766,10 +1931,19 @@ int wischen() {
     }
   }
 
+  // Drei Sekunden auf die unterste Zeile: Theme wechseln. Kuerzer als die
+  // sechs Sekunden fuer das Setup, und die Zeile ist in beiden Themes
+  // nur Kleingedrucktes.
+  if (lag_an && ansicht == 0 && !neuling.gefragt && briefing.hinweiseAnzahl == 0 &&
+      startY >= 200 && millis() - startZeit > 3000) {
+    lag_an = false;
+    halteZiel = 3;
+    return 0;
+  }
+
   // Langer Druck oeffnet die Einrichtung. Ohne das kommt man an die
   // Serveradresse nur ueber ein USB-Kabel oder indem man das WLAN abschaltet:
   // beides schlecht, wenn das Geraet am Arbeitsplatz steht.
-  const bool aufDerUhr = ansicht == 0 && startX < 150 && startY > KOPF_H && startY < 120;
   if (lag_an && !aufDerUhr && millis() - startZeit > 6000) {
     lag_an = false;
     tft.fillScreen(C_GRUND);
@@ -1898,7 +2072,7 @@ int wischen() {
     }
 
     // Oben auf einen der Punkte: direkt auf diese Seite springen.
-    if (startY < KOPF_H + 8) {
+    if (startY < KOPF_H + 8 && !gesichtAktiv()) {
       for (int i = 0; i < ANSICHTEN; i++) {
         const int x = BREIT - 100 + i * 16;
         if (abs(startX - x) < 10) {
@@ -1953,6 +2127,7 @@ int wischen() {
  */
 void uebergang(int richtung) {
   const int schritt = 20;
+  gesichtSteht = false;
   if (richtung >= 0) {
     for (int x = 0; x < BREIT; x += schritt) {
       tft.fillRect(x, 0, schritt, HOCH, C_FLAECHE);
@@ -2025,6 +2200,37 @@ void setup() {
   tft.setFreeFont(S_GROSS);
   tft.setTextColor(C_GEDAEMPFT, C_GRUND);
   tft.drawString("Mia OS", BREIT / 2, HOCH / 2);
+
+  // Das Gesicht: Sprites anlegen und einmal messen, wie lange ein Bild
+  // beider Augen braucht. Gerechnet waren 6 ms, und "gerechnet" war der
+  // Grund, es hier zu messen. Die Zahl steht kurz auf dem Startbild und im
+  // Log, damit sie ohne Kabel ablesbar ist.
+  merker.begin("jana", true);
+  themeGesicht = merker.getUChar("theme", 1) == 1;
+  gesichtEinst.farbe = merker.getUShort("augfarbe", 0x5E5F);
+  gesichtEinst.blinzeln = merker.getUChar("blinzeln", 1) == 1;
+  gesichtEinst.umherschauen = merker.getUChar("schauen", 1) == 1;
+  merker.end();
+  if (gesichtStart(gesichtEinst)) {
+    bildUs = gesichtMessen(60);
+    Serial.printf("[jana-display] Augen: %lu us je Bild, Heap frei %u\n",
+                  (unsigned long)bildUs, ESP.getFreeHeap());
+    tft.fillRect(0, AUGE_Y, BREIT, AUGE_H, C_GRUND);
+    tft.setFreeFont(S_GROSS);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(C_GEDAEMPFT, C_GRUND);
+    tft.drawString("Mia OS", BREIT / 2, HOCH / 2);
+    tft.setFreeFont(S_KLEIN);
+    tft.setTextColor(C_LINIE, C_GRUND);
+    char zeile[48];
+    snprintf(zeile, sizeof(zeile), "Augen %lu.%lu ms je Bild  ·  %s",
+             (unsigned long)(bildUs / 1000), (unsigned long)((bildUs % 1000) / 100),
+             FIRMWARE_VERSION);
+    tft.drawString(zeile, BREIT / 2, HOCH / 2 + 28);
+  } else {
+    Serial.println("[jana-display] Augen: kein Speicher fuer Sprites, Seiten-Theme");
+    themeGesicht = false;
+  }
 
   touchSPI.begin(TOUCH_CLK, TOUCH_MISO, TOUCH_MOSI, TOUCH_CS);
   touch.begin(touchSPI);
@@ -2174,8 +2380,19 @@ void loop() {
       led(false, true, false);
       delay(150);
       led(false, false, false);
+      gesichtZwinkern();
       briefingHolen();
     }
+    neuZeichnen = true;
+  } else if (halteZiel == 3) {
+    // Theme wechseln und merken. Bis Mia OS das einstellt (0.2.x), ist das
+    // der einzige Schalter.
+    themeGesicht = !themeGesicht;
+    merker.begin("jana", false);
+    merker.putUChar("theme", themeGesicht ? 1 : 0);
+    merker.end();
+    gesichtSteht = false;
+    uebergang(1);
     neuZeichnen = true;
   }
 
@@ -2205,6 +2422,8 @@ void loop() {
     if (hinweisTipps >= 4)
       antwortText = hinweisKnopf == 1 ? "fame" : "shame";
     senden("/api/hinweise/" + String(briefing.hinweisId) + "/" + antwortText, "{}");
+    if (hinweisTipps >= 4 && hinweisKnopf == 1)
+      gesichtZwinkern();
     hinweisKnopf = 0;
     hinweisTipps = 0;
     briefingHolen();
@@ -2276,6 +2495,10 @@ void loop() {
   if (millis() - letzterVersuch > HOLINTERVALL_MS || letzterVersuch == 0) {
     letzterVersuch = millis();
     const bool stoerungVorher = stoerungAktiv();
+    const bool datenVorher = habenDaten;
+    const Lage lageVorher = lage;
+    const String updateVorher = neuling.version;
+    gesichtDenken();
     briefingHolen();
     homelabHolen();
     // Im selben Takt mitgefragt: Mia OS erfaehrt dabei, dass es dieses
@@ -2285,8 +2508,19 @@ void loop() {
     // "vor X min" sind dann die eigentliche Information. Nur nicht, solange
     // der Update-Dialog steht, sonst ist er nach zwei Minuten weg.
     neuZeichnen = !neuling.gefragt;
-    if (stoerungAktiv() != stoerungVorher)
+    if (stoerungAktiv() != stoerungVorher) {
       Serial.printf("[jana-display] Homelab: %d von %d\n", homelab.oben, homelab.gesamt);
+      // Neue Stoerung: Schreck. Entwarnung: Zwinkern.
+      if (stoerungAktiv())
+        gesichtSchreck();
+      else
+        gesichtZwinkern();
+    }
+    // Verbindung gerade verloren: das ist auch ein Schreck.
+    if (datenVorher && lageVorher == LAGE_OK && lage != LAGE_OK)
+      gesichtSchreck();
+    if (updateVorher.isEmpty() && !neuling.version.isEmpty())
+      gesichtZwinkern();
   }
 
   // Die Startseite lebt: die Uhr laeuft weiter, und die Restzeit stimmt nur,
@@ -2323,6 +2557,11 @@ void loop() {
     if (millis() < eier.raphBis && ansicht != KAMMER)
       raphZeichnen();
   }
+
+  // Die Augen leben zwischen den Bildern. Nur wenn nichts darueber liegt.
+  if (gesichtAktiv() && gesichtSteht && !neuling.gefragt && briefing.hinweiseAnzahl == 0 &&
+      !eier.stein)
+    gesichtTakt();
 
   // Fragen, sobald etwas bereitsteht.
   //
