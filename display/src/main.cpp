@@ -137,10 +137,15 @@ TFT_eSPI tft = TFT_eSPI();
 SPIClass touchSPI(VSPI);
 XPT2046_Touchscreen touch(TOUCH_CS, TOUCH_IRQ);
 
-// Vorgabe, die beim ersten Start im Einrichtungsportal ueberschrieben wird.
-// Bewusst eine Beispieladresse: die echte gehoert in kein Repository, und
-// wer das Projekt nachbaut, hat ohnehin eine andere.
-char basisUrl[80] = "http://mia-os.local:8080";
+// Vorgabe, falls noch nichts eingerichtet wurde. Wird beim ersten Start im
+// Einrichtungsportal gesetzt und liegt danach im NVS.
+//
+// Achtung, teuer gelernt am 11.09.2026: WiFiManager speichert eigene Felder
+// NICHT von selbst. Ohne das Sichern unten stand hier bei jedem Start wieder
+// die einkompilierte Vorgabe, und als die von der echten Adresse auf einen
+// Beispielnamen geaendert wurde, war das Geraet stumm: im WLAN, aber ohne
+// Server. Deshalb wird der Wert jetzt ausdruecklich abgelegt und gelesen.
+char basisUrl[80] = "http://192.168.1.10:8080";
 
 struct Termin {
   String titel;
@@ -1121,7 +1126,7 @@ void anzeigeZeichnen() {
   // Der Hinweis nennt beide Wege, seit Tippen dazugekommen ist.
   tft.setTextDatum(TR_DATUM);
   tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
-  tft.drawString("< tippen >", BREIT - 12, FUSS_Y + 6, 1);
+  tft.drawString("< tippen >  halten: Setup", BREIT - 12, FUSS_Y + 6, 1);
 }
 
 /**
@@ -1210,6 +1215,30 @@ int wischen() {
   tippZiel = -1;
   antwort = 0;
   const bool an = touch.tirqTouched() && touch.touched();
+
+  // Langer Druck oeffnet die Einrichtung. Ohne das kommt man an die
+  // Serveradresse nur ueber ein USB-Kabel oder indem man das WLAN abschaltet:
+  // beides schlecht, wenn das Geraet am Arbeitsplatz steht.
+  if (lag_an && millis() - startZeit > 6000) {
+    lag_an = false;
+    tft.fillScreen(C_GRUND);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(C_TEXT, C_GRUND);
+    tft.drawString("Einrichtung", BREIT / 2, 108, 4);
+    tft.setTextColor(C_GEDAEMPFT, C_GRUND);
+    tft.drawString("WLAN verbinden mit Jana-Display", BREIT / 2, 140, 2);
+    WiFiManager wm;
+    WiFiManagerParameter feldUrl("url", "Mia OS Adresse", basisUrl, sizeof(basisUrl) - 1);
+    wm.addParameter(&feldUrl);
+    wm.setConfigPortalTimeout(300);
+    wm.startConfigPortal("Jana-Display");
+    strncpy(basisUrl, feldUrl.getValue(), sizeof(basisUrl) - 1);
+    basisUrl[sizeof(basisUrl) - 1] = '\0';
+    merker.begin("jana", false);
+    merker.putString("url", basisUrl);
+    merker.end();
+    ESP.restart();
+  }
 
   if (an) {
     const TS_Point roh = touch.getPoint();
@@ -1377,6 +1406,15 @@ void setup() {
   // an einem eigenen Bus und braucht dieselbe Drehung noch einmal.
   touch.setRotation(3);
 
+  // Was zuletzt eingerichtet wurde, schlaegt die einkompilierte Vorgabe.
+  merker.begin("jana", true);
+  const String gemerkteUrl = merker.getString("url", "");
+  merker.end();
+  if (!gemerkteUrl.isEmpty()) {
+    strncpy(basisUrl, gemerkteUrl.c_str(), sizeof(basisUrl) - 1);
+    basisUrl[sizeof(basisUrl) - 1] = '\0';
+  }
+
   WiFiManager wm;
   WiFiManagerParameter feldUrl("url", "Mia OS Adresse", basisUrl, sizeof(basisUrl) - 1);
   wm.addParameter(&feldUrl);
@@ -1393,6 +1431,10 @@ void setup() {
   wm.setSaveParamsCallback([&feldUrl]() {
     strncpy(basisUrl, feldUrl.getValue(), sizeof(basisUrl) - 1);
     basisUrl[sizeof(basisUrl) - 1] = '\0';
+    // Dauerhaft ablegen, sonst ist die Adresse nach dem naechsten Start weg.
+    merker.begin("jana", false);
+    merker.putString("url", basisUrl);
+    merker.end();
   });
 
   if (!wm.autoConnect("Jana-Display")) {
