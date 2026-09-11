@@ -34,9 +34,19 @@
  * steht. Es ist ueber das Heimnetz erreichbar und sonst nirgends, und ein
  * fest eingebauter Hostname waere anderswo schlicht falsch.
  *
- * **Nur lesen.** Das Geraet schickt nichts an Mia OS zurueck. Ein Display auf
- * dem Tisch, das nur Daten abholt, kann im schlimmsten Fall nichts kaputt
- * machen, und genau das gehoert zu einem Geraet, das offen herumsteht.
+ * **Fast nur lesen.** Bis 0.1.9 schickte das Geraet nichts zurueck. Seit
+ * 0.1.10 kann es genau drei Dinge: eine faellige Aufgabe abhaken (zwei
+ * Sekunden halten), einen Hinweis von Mia OS beantworten (ok oder spaeter)
+ * und eine begrabene Aufgabe zurueckholen. Alles davon ist umkehrbar, und
+ * nichts davon loescht. Ein Display, das offen herumsteht, darf nicht mehr
+ * koennen als das.
+ *
+ * **Der Tunnel-Watchdog.** Antwortet Mia OS nicht, pingt das Geraet den
+ * Rand des Heimnetzes. Antwortet der, ist der Server das Problem; wenn
+ * nicht, der Tunnel oder die Firmenleitung. Drei verschiedene Saetze auf
+ * dem Display, weil nur einer davon etwas ist, das Mia beheben kann.
+ *
+ * **Und dann gibt es Dinge, die nicht dokumentiert sind.** Regel 62.
  *
  * **Eigene Schrift.** Seit 0.1.9 zeichnet das Geraet mit Inter statt mit den
  * eingebauten Schriften von TFT_eSPI. Der Grund ist banal: die eingebauten
@@ -58,6 +68,8 @@
 #include <time.h>
 
 #include "schriften.h"
+#include "sprites.h"
+#include <ESP32Ping.h>
 
 // --- Farben nach DESIGN.md ------------------------------------------------
 //
@@ -188,8 +200,18 @@ struct Briefing {
   // Ob die Aufgabe schon vor heute faellig war. Die steht dann in Achtung-
   // Farbe, weil sie sonst in der Liste untergeht.
   bool ueberfaellig[MAX_ZEILEN];
+  // Ob die Aufgabe seit mehr als 30 Tagen faellig ist. Die steht dann nicht
+  // mehr mit Titel da, sondern "als .zip in die Friedhofsgaertnerei
+  // exportiert" (Regel 21). Antippen holt sie zurueck.
+  bool begraben[MAX_ZEILEN];
+  int faelligId[MAX_ZEILEN];
   int faelligAnzahl = 0;
   int offen = 0;
+  // Der aelteste offene Hinweis, den Mia OS auf den Tisch legen will.
+  int hinweisId = 0;
+  String hinweisText;
+  String hinweisVon;
+  int hinweiseAnzahl = 0;
 };
 
 struct Homelab {
@@ -214,6 +236,42 @@ String letzterFehler = "";
 
 int ansicht = 0;
 const int ANSICHTEN = 4;
+// Die fuenfte Seite. Erscheint nirgends in der Navigation, hat keinen
+// Punkt oben und kein Wischen hin. Regel 62.
+const int KAMMER = 4;
+
+// --- Was das Geraet sonst noch weiss --------------------------------------
+
+// Wo die Verbindung haengt, wenn sie haengt. Drei Stufen, drei Saetze:
+// der rote Punkt allein sagt nicht, ob man etwas tun kann.
+enum Lage { LAGE_OK, LAGE_KEIN_WLAN, LAGE_KEIN_TUNNEL, LAGE_KEIN_SERVER };
+Lage lage = LAGE_OK;
+// Der Rand des Heimnetzes hinter dem Tunnel. Antwortet der, steht der
+// Tunnel; antwortet nur der Pi, ist der Tunnel weg.
+const IPAddress TUNNEL_PRUEF(172, 16, 50, 1);
+
+// Was gerade an Sondersachen auf dem Schirm liegt.
+struct Eier {
+  bool stein = false;           // Uhr als Steinblock, bis zur naechsten Beruehrung
+  uint32_t schereBis = 0;       // "ey schere" im laufenden Kasten
+  uint32_t raphBis = 0;         // Raphmoment steht
+  int raphStufe = 0;            // wie oft hintereinander geschnipst
+  uint32_t letzterSchnips = 0;
+  int kopfTipps = 0;            // Tipps auf die Kopfzeile fuer die Kammer
+  uint32_t letzterKopfTipp = 0;
+  int wischWand = 0;            // Wische gegen die Wand fuer DOAH
+  uint32_t zugStart = 0;        // wann der Zug losfaehrt, 0 wenn nicht
+  int zugTerminMin = -1;        // fuer welchen Terminbeginn er schon fuhr
+  int regelNr = 0;              // welche Regel die Kammer gerade zeigt
+};
+Eier eier;
+uint32_t doah = 0;            // Der Zaehler fuer nichts. Regel 30.
+String regeln[8];
+int regelnAnzahl = 0;
+// Antwort auf einen Hinweis, wird nach dem Tippen gesendet.
+int hinweisTipps = 0;         // wie oft auf denselben Knopf getippt (Regel 39)
+int hinweisKnopf = 0;         // 1 ok, 2 spaeter
+uint32_t hinweisTippZeit = 0;
 
 // --- Updates ueber die Luft -----------------------------------------------
 //
@@ -244,6 +302,11 @@ Preferences merker;
 
 void updateBalkenZeichnen();
 void updateDialogZeichnen();
+void lageEinordnen();
+bool istSiebenundsechzig(const char *uhr);
+int tageDazwischen(const String &von, const String &bis);
+String saeubern(const String &roh);
+bool holen(const char *pfad, JsonDocument &doc, JsonDocument &filter);
 
 /** Versionen wie 0.1.7 vergleichen. Gibt >0, wenn a neuer als b ist. */
 int versionVergleich(const String &a, const String &b) {
@@ -342,6 +405,19 @@ String passend(const String &text, int breite) {
   return "";
 }
 
+/** Tage zwischen zwei ISO-Daten, grob ueber den Tag des Jahres. Reicht fuer "aelter als 30". */
+int tageDazwischen(const String &von, const String &bis) {
+  auto tag = [](const String &d) {
+    struct tm t = {};
+    t.tm_year = d.substring(0, 4).toInt() - 1900;
+    t.tm_mon = d.substring(5, 7).toInt() - 1;
+    t.tm_mday = d.substring(8, 10).toInt();
+    t.tm_hour = 12;
+    return mktime(&t) / 86400;
+  };
+  return (int)(tag(bis) - tag(von));
+}
+
 /** "07:30" als Minuten seit Mitternacht. -1, wenn da keine Uhrzeit steht. */
 int alsMinuten(const String &hhmm) {
   if (hhmm.length() < 4)
@@ -375,6 +451,38 @@ int jetztMinuten() {
   return jetzt.tm_hour * 60 + jetzt.tm_min;
 }
 
+/**
+ * Herausfinden, wo es haengt, wenn Mia OS nicht antwortet.
+ *
+ * Das Display haengt am Pi, der Pi am Firmennetz, das Firmennetz am
+ * Tunnel, der Tunnel am Heimnetz. Ein Ping auf den Heimnetz-Rand sagt,
+ * ob der Tunnel steht. Faellt der, ist es die Firmenleitung, und daran
+ * kann Mia nichts aendern. Antwortet er, ist Mia OS selbst das Problem.
+ */
+void lageEinordnen() {
+  if (WiFi.status() != WL_CONNECTED) {
+    lage = LAGE_KEIN_WLAN;
+    return;
+  }
+  lage = Ping.ping(TUNNEL_PRUEF, 2) ? LAGE_KEIN_SERVER : LAGE_KEIN_TUNNEL;
+}
+
+/** Etwas an Mia OS schicken. Antwort interessiert nur als Statuscode. */
+bool senden(const String &pfad, const String &json, const char *methode = "POST") {
+  if (WiFi.status() != WL_CONNECTED)
+    return false;
+  HTTPClient http;
+  http.setTimeout(6000);
+  http.setConnectTimeout(4000);
+  if (!http.begin(String(basisUrl) + pfad))
+    return false;
+  http.addHeader("Content-Type", "application/json");
+  const int code = http.sendRequest(methode, json);
+  http.end();
+  Serial.printf("[jana-display] %s %s -> %d\n", methode, pfad.c_str(), code);
+  return code >= 200 && code < 300;
+}
+
 /** Eine Anfrage an Mia OS. Gibt ``false`` zurueck und setzt ``letzterFehler``. */
 bool holen(const char *pfad, JsonDocument &doc, JsonDocument &filter) {
   if (WiFi.status() != WL_CONNECTED) {
@@ -392,8 +500,10 @@ bool holen(const char *pfad, JsonDocument &doc, JsonDocument &filter) {
   if (code != 200) {
     letzterFehler = code > 0 ? ("HTTP " + String(code)) : "keine Antwort";
     http.end();
+    lageEinordnen();
     return false;
   }
+  lage = LAGE_OK;
   const DeserializationError fehler =
       deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
   http.end();
@@ -590,6 +700,10 @@ bool briefingHolen() {
   }
   filter["faellig"][0]["titel"] = true;
   filter["faellig"][0]["datum"] = true;
+  filter["faellig"][0]["id"] = true;
+  filter["hinweise"][0]["id"] = true;
+  filter["hinweise"][0]["text"] = true;
+  filter["hinweise"][0]["von"] = true;
 
   JsonDocument doc;
   if (!holen("/api/briefing", doc, filter))
@@ -621,9 +735,21 @@ bool briefingHolen() {
     // Ueberfaellig heisst: Datum liegt vor heute. Beide sind ISO-Daten,
     // also reicht ein Zeichenvergleich, ohne Kalenderrechnung.
     const String datum = f["datum"].as<String>();
-    frisch.ueberfaellig[frisch.faelligAnzahl] =
+    const bool ueber =
         datum.length() == 10 && frisch.datum.length() == 10 && datum < frisch.datum;
+    frisch.ueberfaellig[frisch.faelligAnzahl] = ueber;
+    frisch.begraben[frisch.faelligAnzahl] = ueber && tageDazwischen(datum, frisch.datum) > 30;
+    frisch.faelligId[frisch.faelligAnzahl] = f["id"] | 0;
     frisch.faellig[frisch.faelligAnzahl++] = saeubern(f["titel"].as<String>());
+  }
+
+  JsonArray hinweise = doc["hinweise"].as<JsonArray>();
+  frisch.hinweiseAnzahl = hinweise.size();
+  if (frisch.hinweiseAnzahl > 0) {
+    JsonObject h = hinweise[0];
+    frisch.hinweisId = h["id"] | 0;
+    frisch.hinweisText = saeubern(h["text"].as<String>());
+    frisch.hinweisVon = saeubern(h["von"].as<String>());
   }
 
   // Erst ganz am Ende uebernehmen. Ein Abbruch mittendrin wuerde sonst eine
@@ -696,6 +822,24 @@ bool homelabHolen() {
   frisch.gueltig = true;
   homelab = frisch;
   return true;
+}
+
+/** Die Regeln fuer die Kammer. Einmal beim Start, acht Stueck reichen. */
+void regelnHolen() {
+  JsonDocument filter;
+  filter["regeln"] = true;
+  JsonDocument doc;
+  if (!holen("/api/regeln", doc, filter))
+    return;
+  regelnAnzahl = 0;
+  JsonArray alle = doc["regeln"].as<JsonArray>();
+  // Zufaellig auswaehlen, damit nicht jeden Tag dieselben acht kommen.
+  const int n = alle.size();
+  if (n == 0)
+    return;
+  int start = (int)(esp_random() % n);
+  for (int i = 0; i < n && regelnAnzahl < 8; i++)
+    regeln[regelnAnzahl++] = saeubern(alle[(start + i * 7) % n].as<String>());
 }
 
 bool stoerungAktiv() {
@@ -773,10 +917,15 @@ void leerlaufZeichnen(const struct tm &jetzt, bool zeitDa) {
   if (zeitDa)
     strftime(uhr, sizeof(uhr), "%H:%M", &jetzt);
 
-  tft.setFreeFont(S_RIESIG);
-  tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(C_TEXT, C_GRUND);
-  tft.drawString(uhr, BREIT / 2, 62);
+  if (eier.stein) {
+    tft.setSwapBytes(true);
+    tft.pushImage(BREIT / 2 - SPRITE_B / 2, 56, SPRITE_B, SPRITE_B, SPRITE_STEIN);
+  } else {
+    tft.setFreeFont(S_RIESIG);
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(istSiebenundsechzig(uhr) ? C_AKZENT : C_TEXT, C_GRUND);
+    tft.drawString(uhr, BREIT / 2, 62);
+  }
 
   if (zeitDa) {
     static const char *tage[] = {"Sonntag", "Montag", "Dienstag", "Mittwoch",
@@ -842,10 +991,18 @@ void jetztZeichnen() {
   if (zeitDa)
     strftime(uhr, sizeof(uhr), "%H:%M", &jetzt);
 
-  tft.setFreeFont(S_UHR);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(C_TEXT, C_GRUND);
-  tft.drawString(uhr, 8, 46);
+  if (eier.stein) {
+    // Zehn Sekunden auf die Uhr gehalten: die Uhr ist jetzt ein Stein.
+    // Bleibt, bis jemand das Geraet wieder anfasst. Wird nicht erklaert.
+    tft.setSwapBytes(true);
+    tft.pushImage(24, 44, SPRITE_B, SPRITE_B, SPRITE_STEIN);
+  } else {
+    tft.setFreeFont(S_UHR);
+    tft.setTextDatum(TL_DATUM);
+    // Regel 67. Um 06:07 und 16:07 ist die Uhr kurz rot.
+    tft.setTextColor(istSiebenundsechzig(uhr) ? C_AKZENT : C_TEXT, C_GRUND);
+    tft.drawString(uhr, 8, 46);
+  }
 
   if (zeitDa) {
     static const char *tage[] = {"Sonntag", "Montag", "Dienstag", "Mittwoch",
@@ -855,7 +1012,7 @@ void jetztZeichnen() {
              jetzt.tm_mday, jetzt.tm_mon + 1);
     tft.setFreeFont(S_NORMAL);
     tft.setTextColor(C_GEDAEMPFT, C_GRUND);
-    tft.drawString(passend(zeile, spalte - 24), 10, 90);
+    tft.drawString(passend(zeile, spalte - 24), 10, eier.stein ? 112 : 90);
   }
 
   // Der Tag als Strich, von sieben bis zweiundzwanzig Uhr.
@@ -907,7 +1064,7 @@ void jetztZeichnen() {
     tft.setFreeFont(S_KLEIN);
     tft.setTextDatum(TL_DATUM);
     tft.setTextColor(C_GEDAEMPFT, C_ERHOBEN);
-    tft.drawString("läuft", spalte + 12, y + 6);
+    tft.drawString(millis() < eier.schereBis ? "ey schere" : "läuft", spalte + 12, y + 6);
     tft.setFreeFont(S_NORMAL);
     tft.setTextDatum(TR_DATUM);
     tft.setTextColor(C_AKZENT, C_ERHOBEN);
@@ -1012,6 +1169,10 @@ void kopfZeichnen() {
  * so dass das Auge sie der Reihe nach findet. Unter den Terminen, wenn
  * Platz ist: die faelligen Aufgaben mit Titel.
  */
+// Wo die Faellig-Zeilen auf der Heute-Seite stehen, fuer das Antippen.
+int faelligY[MAX_ZEILEN];
+int faelligZeilen = 0;
+
 void termineZeichnen() {
   const bool istHeute = ansicht == 1;
   const Termin *liste = istHeute ? briefing.heute : briefing.morgen;
@@ -1077,14 +1238,24 @@ void termineZeichnen() {
   // Faellige Aufgaben, so viele wie noch Platz haben. Auf der Heute-Seite,
   // weil sie dorthin gehoeren, wo der Tag geplant wird. Morgen zeigt sie
   // nicht: was morgen faellig ist, weiss Mia OS heute noch nicht.
+  faelligZeilen = 0;
   if (istHeute && briefing.faelligAnzahl > 0) {
     tft.setFreeFont(S_KLEIN);
     for (int i = 0; i < briefing.faelligAnzahl && y + 15 <= FUSS_Y - 2; i++) {
+      faelligY[i] = y;
+      faelligZeilen = i + 1;
       const uint16_t farbe = briefing.ueberfaellig[i] ? C_FEHLER : C_ACHTUNG;
       tft.fillCircle(15, y + 7, 3, farbe);
       tft.setTextDatum(TL_DATUM);
-      tft.setTextColor(C_TEXT, C_GRUND);
-      tft.drawString(passend(briefing.faellig[i], BREIT - 36), 24, y);
+      // Regel 21: was ueber 30 Tage liegt, wurde exportiert. Antippen holt
+      // es zurueck, das ist die Funktion hinter dem Witz.
+      if (briefing.begraben[i]) {
+        tft.setTextColor(C_GEDAEMPFT, C_GRUND);
+        tft.drawString("als .zip in die Friedhofsgärtnerei exportiert", 24, y);
+      } else {
+        tft.setTextColor(C_TEXT, C_GRUND);
+        tft.drawString(passend(briefing.faellig[i], BREIT - 36), 24, y);
+      }
       y += 15;
     }
   }
@@ -1264,20 +1435,198 @@ void updateDialogZeichnen() {
   }
 }
 
+/** Regel 67: 06:07, 16:07, oder die Zahl 67 irgendwo in der Uhr. */
+bool istSiebenundsechzig(const char *uhr) {
+  return strstr(uhr, "6:07") != nullptr || strstr(uhr, "67") != nullptr;
+}
+
+// Masse des Hinweis-Kastens. Zeichnen und Treffer teilen sich die Zahlen.
+const int HW_X = 20, HW_Y = 48, HW_B = BREIT - 40, HW_H = 128;
+const int HW_KY = HW_Y + HW_H - 46, HW_KH = 34;
+const int HW_KB = (HW_B - 3 * 12) / 2;
+const int HW_K1 = HW_X + 12, HW_K2 = HW_K1 + HW_KB + 12;
+
+/**
+ * Ein Zettel von Mia OS: Text, Absender, zwei Knoepfe.
+ *
+ * Liegt ueber der Seite wie der Update-Dialog. "ok" heisst gesehen und
+ * weg, "später" schiebt ihn eine Stunde. Viermal auf denselben Knopf ist
+ * Regel 39: Hall of Fame oder Hall of Shame.
+ */
+void hinweisZeichnen() {
+  tft.fillRoundRect(HW_X + 3, HW_Y + 3, HW_B, HW_H, 10, C_GRUND);
+  tft.fillRoundRect(HW_X, HW_Y, HW_B, HW_H, 10, C_ERHOBEN);
+  tft.drawRoundRect(HW_X, HW_Y, HW_B, HW_H, 10, C_KAL_PRIVAT);
+
+  tft.setFreeFont(S_KLEIN);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(C_GEDAEMPFT, C_ERHOBEN);
+  tft.drawString(briefing.hinweisVon + (briefing.hinweiseAnzahl > 1
+                                            ? "  (+" + String(briefing.hinweiseAnzahl - 1) + ")"
+                                            : ""),
+                 HW_X + 12, HW_Y + 8);
+
+  // Zwei Zeilen Text, an Wortgrenzen umgebrochen. Was dann noch uebrig
+  // ist, wird abgeschnitten: 120 Zeichen passen fast immer.
+  tft.setFreeFont(S_FETT);
+  tft.setTextColor(C_TEXT, C_ERHOBEN);
+  String rest = briefing.hinweisText;
+  const int breite = HW_B - 24;
+  for (int zeile = 0; zeile < 2 && rest.length(); zeile++) {
+    String teil = rest;
+    while (tft.textWidth(teil) > breite) {
+      const int leer = teil.lastIndexOf(' ');
+      if (leer <= 0) {
+        teil = passend(teil, breite);
+        break;
+      }
+      teil = teil.substring(0, leer);
+    }
+    if (zeile == 1 && teil.length() < rest.length())
+      teil = passend(rest, breite);
+    tft.drawString(teil, HW_X + 12, HW_Y + 26 + zeile * 24);
+    rest = teil.length() < rest.length() ? rest.substring(teil.length() + 1) : "";
+  }
+
+  tft.setFreeFont(S_NORMAL);
+  tft.fillRoundRect(HW_K1, HW_KY, HW_KB, HW_KH, 6, C_KAL_PRIVAT);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(C_TEXT, C_KAL_PRIVAT);
+  tft.drawString(hinweisKnopf == 1 && hinweisTipps > 1 ? String(hinweisTipps) + "x ok" : "ok",
+                 HW_K1 + HW_KB / 2, HW_KY + HW_KH / 2);
+  tft.fillRoundRect(HW_K2, HW_KY, HW_KB, HW_KH, 6, C_FLAECHE);
+  tft.drawRoundRect(HW_K2, HW_KY, HW_KB, HW_KH, 6, C_LINIE);
+  tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
+  tft.drawString(hinweisKnopf == 2 && hinweisTipps > 1 ? String(hinweisTipps) + "x später"
+                                                       : "später",
+                 HW_K2 + HW_KB / 2, HW_KY + HW_KH / 2);
+}
+
+/**
+ * Die Kammer des Korsaren. Regel 62.
+ *
+ * Fuenfmal auf die Kopfzeile getippt. Kein Punkt oben, keine Seite in der
+ * Reihenfolge, Wischen fuehrt zurueck. Zeigt eine Regel, Tippen die
+ * naechste.
+ */
+void kammerZeichnen() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setFreeFont(S_FETT);
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(C_ACHTUNG, TFT_BLACK);
+  tft.drawString("!  KAMMER DES KORSAREN  !", BREIT / 2, 18);
+  tft.drawFastHLine(24, 48, BREIT - 48, C_LINIE);
+
+  if (regelnAnzahl == 0) {
+    tft.setFreeFont(S_NORMAL);
+    tft.setTextColor(C_GEDAEMPFT, TFT_BLACK);
+    tft.drawString("Es gibt keine Kammer.", BREIT / 2, 110);
+    return;
+  }
+  // Regeltext auf bis zu vier Zeilen umbrechen.
+  const String &r = regeln[eier.regelNr % regelnAnzahl];
+  tft.setFreeFont(S_NORMAL);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(C_TEXT, TFT_BLACK);
+  String rest = r;
+  int y = 66;
+  for (int zeile = 0; zeile < 5 && rest.length(); zeile++) {
+    String teil = rest;
+    while (tft.textWidth(teil) > BREIT - 40) {
+      const int leer = teil.lastIndexOf(' ');
+      if (leer <= 0) {
+        teil = passend(teil, BREIT - 40);
+        break;
+      }
+      teil = teil.substring(0, leer);
+    }
+    tft.drawString(teil, 20, y);
+    y += 24;
+    rest = teil.length() < rest.length() ? rest.substring(teil.length() + 1) : "";
+  }
+
+  tft.setFreeFont(S_KLEIN);
+  tft.setTextDatum(BC_DATUM);
+  tft.setTextColor(C_GEDAEMPFT, TFT_BLACK);
+  tft.drawString("Es wird nicht laut darüber geredet.", BREIT / 2, HOCH - 8);
+}
+
+/**
+ * Raphmoment. Regel 61: wer mehr als dreimal schnipst, wird extracted.
+ *
+ * Dreimal schnell auf dieselbe Stelle getippt ist das Display-Aequivalent
+ * zum Schnipsen. Beim dritten Mal steht Fridolinatis Satz in der
+ * Fusszeile, beim vierten wird auf die Homelab-Seite verlegt.
+ */
+void raphZeichnen() {
+  tft.fillRect(0, FUSS_Y, BREIT, HOCH - FUSS_Y, C_FLAECHE);
+  tft.drawFastHLine(0, FUSS_Y, BREIT, C_LINIE);
+  tft.setFreeFont(S_KLEIN);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(eier.raphStufe >= 4 ? C_FEHLER : C_ACHTUNG, C_FLAECHE);
+  tft.drawString(eier.raphStufe >= 4 ? "extracted." : "Leute, könnt ihr damit aufhören",
+                 12, FUSS_Y + 5);
+  // Raphael, klein, unten rechts ueber der Fusszeile.
+  tft.setSwapBytes(true);
+  tft.pushImage(BREIT - SPRITE_B - 8, FUSS_Y - SPRITE_B - 2, SPRITE_B, SPRITE_B, SPRITE_RAPH);
+}
+
+/**
+ * Die Zugentgleisung. Ein 8-Pixel-Zug faehrt unten von rechts nach links
+ * aus dem Bild, wenn ein Termin anfaengt und niemand das Geraet anfasst.
+ * Kein Text, kein Ton. Wer es kennt, kennt es.
+ */
+void zugZeichnen() {
+  if (!eier.zugStart)
+    return;
+  const uint32_t weg = millis() - eier.zugStart;
+  const int x = BREIT - (int)(weg / 12);  // 12 ms je Pixel, ~4 s ueber das Bild
+  const int y = FUSS_Y - 10;
+  // Spur freimachen, wo der Zug gerade war.
+  tft.fillRect(x + 22, y, 6, 8, C_GRUND);
+  if (x < -30) {
+    eier.zugStart = 0;
+    return;
+  }
+  // Lok mit Schornstein und zwei Wagen.
+  tft.fillRect(x, y + 2, 10, 6, C_FEHLER);
+  tft.fillRect(x + 7, y - 1, 3, 3, C_FEHLER);
+  tft.fillRect(x + 12, y + 3, 7, 5, C_GEDAEMPFT);
+  tft.fillRect(x + 21, y + 3, 7, 5, C_GEDAEMPFT);
+  tft.drawPixel(x + 2, y + 8, C_TEXT);
+  tft.drawPixel(x + 8, y + 8, C_TEXT);
+  tft.drawPixel(x + 15, y + 8, C_TEXT);
+  tft.drawPixel(x + 24, y + 8, C_TEXT);
+}
+
 /** Die ganze Anzeige. Wird nur bei Aenderung gezeichnet, nicht im Takt. */
 void anzeigeZeichnen() {
+  if (ansicht == KAMMER) {
+    kammerZeichnen();
+    return;
+  }
   tft.fillScreen(C_GRUND);
   kopfZeichnen();
 
   if (!habenDaten && ansicht != 3) {
+    // Drei verschiedene Saetze, weil drei verschiedene Dinge kaputt sein
+    // koennen und nur eines davon Mia betrifft.
+    const char *titel = "Keine Verbindung";
+    const char *satz = "";
+    switch (lage) {
+    case LAGE_KEIN_WLAN: titel = "Kein WLAN"; satz = "Pi aus oder zu weit weg"; break;
+    case LAGE_KEIN_TUNNEL: titel = "Tunnel weg"; satz = "Firmennetz. Nichts zu tun, warten."; break;
+    case LAGE_KEIN_SERVER: titel = "Mia OS antwortet nicht"; satz = "Tunnel steht, Server nicht"; break;
+    default: break;
+    }
     tft.setFreeFont(S_GROSS);
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(C_GEDAEMPFT, C_GRUND);
-    tft.drawString("Keine Verbindung", BREIT / 2, 96);
+    tft.drawString(titel, BREIT / 2, 92);
     tft.setFreeFont(S_NORMAL);
-    tft.drawString(passend(letzterFehler, BREIT - 24), BREIT / 2, 128);
+    tft.drawString(satz, BREIT / 2, 124);
     tft.setFreeFont(S_KLEIN);
-    tft.drawString(passend(String(basisUrl), BREIT - 24), BREIT / 2, 152);
+    tft.drawString(passend(letzterFehler + "  " + String(basisUrl), BREIT - 24), BREIT / 2, 152);
     return;
   }
 
@@ -1300,15 +1649,26 @@ void anzeigeZeichnen() {
 
   tft.setFreeFont(S_KLEIN);
   tft.setTextDatum(TC_DATUM);
-  tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
-  tft.drawString(briefing.datum, BREIT / 2, FUSS_Y + 5);
+  // Sind die Daten alt, steht hier statt des Datums, woran es liegt.
+  if (lage == LAGE_KEIN_TUNNEL) {
+    tft.setTextColor(C_ACHTUNG, C_FLAECHE);
+    tft.drawString("Tunnel weg, Daten alt", BREIT / 2, FUSS_Y + 5);
+  } else if (lage == LAGE_KEIN_SERVER) {
+    tft.setTextColor(C_ACHTUNG, C_FLAECHE);
+    tft.drawString("Mia OS antwortet nicht", BREIT / 2, FUSS_Y + 5);
+  } else if (lage == LAGE_KEIN_WLAN) {
+    tft.setTextColor(C_FEHLER, C_FLAECHE);
+    tft.drawString("kein WLAN", BREIT / 2, FUSS_Y + 5);
+  } else {
+    tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
+    tft.drawString(briefing.datum, BREIT / 2, FUSS_Y + 5);
+  }
 
-  // Nur noch der eine Hinweis, den man nicht erraten kann. Dass Tippen
-  // blaettert, findet jeder in zehn Sekunden selbst heraus; dass sechs
-  // Sekunden Halten die Einrichtung oeffnet, nicht.
+  // Rechts: der Zaehler fuer nichts. Regel 30. Waechst mit jedem Wisch
+  // gegen die Wand und wird nie erklaert.
   tft.setTextDatum(TR_DATUM);
   tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
-  tft.drawString("halten: Setup", BREIT - 12, FUSS_Y + 5);
+  tft.drawString(doah > 0 ? "DOAH " + String(doah) : "halten: Setup", BREIT - 12, FUSS_Y + 5);
 }
 
 /**
@@ -1362,6 +1722,13 @@ void ledPruefen() {
 int tippZiel = -1;
 // Was im Update-Dialog getippt wurde: 1 Ja, 2 Spaeter, 3 Nein, 0 nichts.
 int antwort = 0;
+// Welche Faellig-Zeile angetippt wurde (Index), -1 fuer keine.
+int faelligTipp = -1;
+// Ob gerade ein Hinweis-Knopf getippt wurde: 1 ok, 2 spaeter.
+int hinweisAntwort = 0;
+// Halten auf die Uhr (Stein), auf eine Faellig-Zeile (erledigt).
+int halteZiel = 0;  // 1 Uhr, 2 Faellig-Zeile
+int halteIndex = -1;
 
 int wischen() {
   static bool lag_an = false;
@@ -1372,12 +1739,38 @@ int wischen() {
 
   tippZiel = -1;
   antwort = 0;
+  faelligTipp = -1;
+  hinweisAntwort = 0;
+  halteZiel = 0;
   const bool an = touch.tirqTouched() && touch.touched();
+
+  // Langes Halten an bestimmten Stellen, ausgewertet solange der Finger
+  // noch liegt. Zehn Sekunden auf die Uhr: Stein. Zwei Sekunden auf eine
+  // faellige Aufgabe: erledigt. Beides laenger als ein Wisch, kuerzer als
+  // die sechs Sekunden fuer das Setup, damit sich nichts ueberschneidet.
+  if (lag_an && ansicht == 0 && !neuling.gefragt && startX < 150 && startY > KOPF_H &&
+      startY < 120 && millis() - startZeit > 10000) {
+    lag_an = false;
+    halteZiel = 1;
+    return 0;
+  }
+  if (lag_an && ansicht == 1 && !neuling.gefragt && briefing.hinweiseAnzahl == 0 &&
+      millis() - startZeit > 2000) {
+    for (int i = 0; i < faelligZeilen; i++) {
+      if (startY >= faelligY[i] - 3 && startY < faelligY[i] + 15) {
+        lag_an = false;
+        halteZiel = 2;
+        halteIndex = i;
+        return 0;
+      }
+    }
+  }
 
   // Langer Druck oeffnet die Einrichtung. Ohne das kommt man an die
   // Serveradresse nur ueber ein USB-Kabel oder indem man das WLAN abschaltet:
   // beides schlecht, wenn das Geraet am Arbeitsplatz steht.
-  if (lag_an && millis() - startZeit > 6000) {
+  const bool aufDerUhr = ansicht == 0 && startX < 150 && startY > KOPF_H && startY < 120;
+  if (lag_an && !aufDerUhr && millis() - startZeit > 6000) {
     lag_an = false;
     tft.fillScreen(C_GRUND);
     tft.setFreeFont(S_GROSS);
@@ -1444,6 +1837,39 @@ int wischen() {
 
   // Kurz und fast ohne Weg heisst: getippt.
   if (abs(wegX) < TIPP_WEG && abs(wegY) < TIPP_WEG) {
+    // Raphmoment: dreimal in unter einer Sekunde auf dieselbe Stelle ist
+    // das Display-Aequivalent zum Schnipsen. Regel 61.
+    {
+      static int schnipsX = -100, schnipsY = -100;
+      const uint32_t jetztMs = millis();
+      if (jetztMs - eier.letzterSchnips < 700 && abs(startX - schnipsX) < 20 &&
+          abs(startY - schnipsY) < 20) {
+        eier.raphStufe++;
+      } else {
+        eier.raphStufe = 1;
+      }
+      eier.letzterSchnips = jetztMs;
+      schnipsX = startX;
+      schnipsY = startY;
+      if (eier.raphStufe >= 3) {
+        eier.raphBis = jetztMs + 4000;
+        neuZeichnen = true;
+        if (eier.raphStufe >= 4) {
+          // Extracted: auf die Homelab-Seite verlegt, egal wo man war.
+          tippZiel = 3;
+          eier.raphStufe = 0;
+        }
+        return 0;
+      }
+    }
+
+    // In der Kammer: Tippen zeigt die naechste Regel.
+    if (ansicht == KAMMER) {
+      eier.regelNr++;
+      neuZeichnen = true;
+      return 0;
+    }
+
     // Steht der Update-Dialog, gehoert jeder Tipp ihm. Ein Seitenwechsel
     // unter einem offenen Dialog waere verwirrend.
     if (neuling.gefragt) {
@@ -1461,6 +1887,16 @@ int wischen() {
       return 0;
     }
 
+    // Liegt ein Hinweis auf dem Tisch, gehoeren die Knoepfe ihm.
+    if (briefing.hinweiseAnzahl > 0 && startY >= HW_KY - 6 && startY <= HW_KY + HW_KH + 6) {
+      if (startX >= HW_K1 && startX <= HW_K1 + HW_KB)
+        hinweisAntwort = 1;
+      else if (startX >= HW_K2 && startX <= HW_K2 + HW_KB)
+        hinweisAntwort = 2;
+      if (hinweisAntwort)
+        return 0;
+    }
+
     // Oben auf einen der Punkte: direkt auf diese Seite springen.
     if (startY < KOPF_H + 8) {
       for (int i = 0; i < ANSICHTEN; i++) {
@@ -1470,7 +1906,28 @@ int wischen() {
           return 0;
         }
       }
+      // Fuenfmal auf den Seitennamen links oben, in unter drei Sekunden:
+      // die Kammer. Regel 62.
+      if (startX < 120) {
+        const uint32_t jetztMs = millis();
+        eier.kopfTipps = (jetztMs - eier.letzterKopfTipp < 700) ? eier.kopfTipps + 1 : 1;
+        eier.letzterKopfTipp = jetztMs;
+        if (eier.kopfTipps >= 5) {
+          eier.kopfTipps = 0;
+          tippZiel = KAMMER;
+        }
+      }
       return 0;
+    }
+
+    // Auf der Heute-Seite auf eine Faellig-Zeile: Begrabenes zurueckholen.
+    if (ansicht == 1 && briefing.hinweiseAnzahl == 0) {
+      for (int i = 0; i < faelligZeilen; i++) {
+        if (startY >= faelligY[i] - 3 && startY < faelligY[i] + 15) {
+          faelligTipp = i;
+          return 0;
+        }
+      }
     }
     // Linkes Viertel zurueck, rechtes Viertel vor. Auf einem resistiven
     // Panel trifft ein Tippen zuverlaessiger als ein Wisch.
@@ -1557,8 +2014,15 @@ void setup() {
   ledcWrite(BL_KANAL, HELL_TAG);
 
   tft.fillScreen(C_GRUND);
-  tft.setFreeFont(S_GROSS);
+  // 0,8 Sekunden lang, in der kleinsten Schrift, nur beim Neustart. Dann
+  // "Mia OS" drueber. Wer nicht hinsieht, sieht es nicht.
+  tft.setFreeFont(S_KLEIN);
   tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(C_LINIE, C_GRUND);
+  tft.drawString("Arbeitszeitbetrug Central", BREIT / 2, HOCH / 2);
+  delay(800);
+  tft.fillRect(0, HOCH / 2 - 20, BREIT, 40, C_GRUND);
+  tft.setFreeFont(S_GROSS);
   tft.setTextColor(C_GEDAEMPFT, C_GRUND);
   tft.drawString("Mia OS", BREIT / 2, HOCH / 2);
 
@@ -1635,10 +2099,13 @@ void setup() {
     }
   }
 
-  // Was Mia zuletzt abgelehnt hat, gilt weiter.
+  // Was Mia zuletzt abgelehnt hat, gilt weiter. Und der Zaehler.
   merker.begin("jana", true);
   neuling.abgelehnt = merker.getString("abgelehnt", "");
+  doah = merker.getUInt("doah", 0);
   merker.end();
+
+  regelnHolen();
 
   // Gleich beim Start nachsehen, nicht erst beim naechsten Abruf.
   updatePruefen();
@@ -1688,14 +2155,122 @@ void loop() {
     return;
   }
 
-  if (wisch != 0) {
-    ansicht = (ansicht + wisch + ANSICHTEN) % ANSICHTEN;
+  // Der Stein faellt bei jeder Beruehrung wieder ab.
+  if (eier.stein && (wisch != 0 || tippZiel >= 0 || touch.touched())) {
+    eier.stein = false;
+    neuZeichnen = true;
+  }
+
+  if (halteZiel == 1) {
+    eier.stein = true;
+    neuZeichnen = true;
+    letzteBeruehrung = 0;  // sonst faellt er sofort wieder ab
+  } else if (halteZiel == 2 && halteIndex >= 0 && halteIndex < briefing.faelligAnzahl) {
+    // Erledigt: PATCH an Mia OS, dann sofort neu holen, damit die Zeile
+    // verschwindet und "offen" runterzaehlt.
+    const int id = briefing.faelligId[halteIndex];
+    if (id > 0 && senden("/api/sammlung/" + String(id),
+                         "{\"eigenschaft\":\"status\",\"wert\":\"fertig\"}", "PATCH")) {
+      led(false, true, false);
+      delay(150);
+      led(false, false, false);
+      briefingHolen();
+    }
+    neuZeichnen = true;
+  }
+
+  if (faelligTipp >= 0 && briefing.begraben[faelligTipp]) {
+    // Aus der Friedhofsgaertnerei zurueckholen: Datum auf heute setzen.
+    const int id = briefing.faelligId[faelligTipp];
+    if (id > 0 && senden("/api/sammlung/" + String(id),
+                         "{\"datum\":\"" + briefing.datum + "\"}", "PATCH"))
+      briefingHolen();
+    neuZeichnen = true;
+  }
+
+  if (hinweisAntwort != 0 && briefing.hinweisId > 0) {
+    // Regel 39: viermal derselbe Knopf in Folge ist Fame oder Shame. Der
+    // erste Tipp zaehlt schon, gesendet wird beim Loslassen der Serie,
+    // also nach 1,2 s ohne weiteren Tipp.
+    if (hinweisAntwort == hinweisKnopf && millis() - hinweisTippZeit < 1200)
+      hinweisTipps++;
+    else
+      hinweisTipps = 1;
+    hinweisKnopf = hinweisAntwort;
+    hinweisTippZeit = millis();
+    neuZeichnen = true;
+  }
+  if (hinweisKnopf != 0 && millis() - hinweisTippZeit > 1200) {
+    String antwortText = hinweisKnopf == 1 ? "ok" : "spaeter";
+    if (hinweisTipps >= 4)
+      antwortText = hinweisKnopf == 1 ? "fame" : "shame";
+    senden("/api/hinweise/" + String(briefing.hinweisId) + "/" + antwortText, "{}");
+    hinweisKnopf = 0;
+    hinweisTipps = 0;
+    briefingHolen();
+    neuZeichnen = true;
+  }
+
+  if (ansicht == KAMMER && wisch != 0) {
+    // Aus der Kammer fuehrt jeder Wisch zurueck auf die erste Seite, als
+    // waere nichts gewesen.
+    ansicht = 0;
+    uebergang(wisch);
+    neuZeichnen = true;
+  } else if (wisch != 0 && ansicht == 0 && wisch < 0) {
+    // Wisch gegen die Wand: DOAH. Zaehlt hoch, blaettert nicht.
+    doah++;
+    eier.wischWand++;
+    merker.begin("jana", false);
+    merker.putUInt("doah", doah);
+    merker.end();
+    neuZeichnen = true;
+  } else if (wisch != 0) {
+    // Dreimal schnell hin und her waehrend ein Termin laeuft: Schere.
+    static uint32_t letzterWisch = 0;
+    static int wischSerie = 0;
+    wischSerie = (millis() - letzterWisch < 900) ? wischSerie + 1 : 1;
+    letzterWisch = millis();
+    if (wischSerie >= 3 && laeuftGerade()) {
+      eier.schereBis = millis() + 5000;
+      wischSerie = 0;
+      ansicht = 0;
+    } else {
+      ansicht = (ansicht + wisch + ANSICHTEN) % ANSICHTEN;
+    }
     uebergang(wisch);
     neuZeichnen = true;
   } else if (tippZiel >= 0 && tippZiel != ansicht) {
     uebergang(tippZiel > ansicht ? 1 : -1);
     ansicht = tippZiel;
     neuZeichnen = true;
+  }
+
+  // Schere und Raph laufen ab, dann wird normal weitergezeichnet.
+  static bool schereStand = false, raphStand = false;
+  const bool schereJetzt = millis() < eier.schereBis;
+  const bool raphJetzt = millis() < eier.raphBis;
+  if (schereJetzt != schereStand || raphJetzt != raphStand) {
+    schereStand = schereJetzt;
+    raphStand = raphJetzt;
+    neuZeichnen = true;
+  }
+
+  // Zugentgleisung: ein Termin hat vor unter drei Minuten angefangen und
+  // seitdem hat niemand das Geraet angefasst.
+  {
+    const Termin *l = laeuftGerade();
+    const int jm = jetztMinuten();
+    if (l && jm >= 0 && jm - l->beginnMin >= 2 && jm - l->beginnMin < 3 &&
+        eier.zugTerminMin != l->beginnMin && ansicht == 0 && !neuling.gefragt &&
+        briefing.hinweiseAnzahl == 0 && millis() - letzteBeruehrung > 180000) {
+      eier.zugTerminMin = l->beginnMin;
+      eier.zugStart = millis();
+    }
+    if (eier.zugStart && ansicht == 0)
+      zugZeichnen();
+    else if (eier.zugStart)
+      eier.zugStart = 0;
   }
 
   if (millis() - letzterVersuch > HOLINTERVALL_MS || letzterVersuch == 0) {
@@ -1743,6 +2318,10 @@ void loop() {
     anzeigeZeichnen();
     if (neuling.gefragt)
       updateDialogZeichnen();
+    else if (briefing.hinweiseAnzahl > 0 && ansicht != KAMMER)
+      hinweisZeichnen();
+    if (millis() < eier.raphBis && ansicht != KAMMER)
+      raphZeichnen();
   }
 
   // Fragen, sobald etwas bereitsteht.
@@ -1755,8 +2334,8 @@ void loop() {
   //
   // Die Unterbrechung regelt ohnehin der Knopf "Spaeter". Wer entscheidet,
   // ob gerade ein guter Moment ist, ist Mia und nicht das Geraet.
-  if (!neuling.gefragt && !neuling.version.isEmpty() &&
-      millis() > neuling.spaeterBis) {
+  if (!neuling.gefragt && !neuling.version.isEmpty() && briefing.hinweiseAnzahl == 0 &&
+      ansicht != KAMMER && millis() > neuling.spaeterBis) {
     neuling.gefragt = true;
     updateDialogZeichnen();
   }
