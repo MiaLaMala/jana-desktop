@@ -23,7 +23,7 @@ static const int PUP_X = 29, PUP_Y = 33;  // Pupille in Ruhe, linke obere Ecke
 static TFT_eSprite links(&tft);
 static TFT_eSprite rechts(&tft);
 static bool bereit = false;
-static bool pause = false;
+static bool angehalten = false;
 
 static GesichtEinstellung einst = {0x5E5F, true, true};
 static GesichtZustand grund = G_WACH;
@@ -155,7 +155,7 @@ void gesichtZwinkern(uint32_t dauerMs) {
   blinzelStart = 0;
 }
 
-void gesichtPause(bool an) { pause = an; }
+void gesichtPause(bool an) { angehalten = an; }
 
 /** Lidstellung 0..100 im Verlauf eines Blinzelns, aus der Zeit seit Beginn. */
 static int blinzelLid(uint32_t seit) {
@@ -235,7 +235,7 @@ static void zeichnen(bool erzwingen) {
 void gesichtZeichnen() { zeichnen(true); }
 
 bool gesichtTakt() {
-  if (!bereit || pause)
+  if (!bereit || angehalten)
     return false;
   const uint32_t jetzt = millis();
   const bool schreck = jetzt < schreckBis;
