@@ -565,7 +565,10 @@ void updatePruefen() {
   http.setConnectTimeout(5000);
 
   String pfad = String(basisUrl) + "/api/firmware/neueste?kennung=" +
-                WiFi.macAddress() + "&name=Jana-Display&version=" + FIRMWARE_VERSION;
+                WiFi.macAddress() + "&name=Jana-Display&version=" + FIRMWARE_VERSION +
+                // Die gemessene Bildzeit der Augen faehrt mit: so laesst sie
+                // sich ohne Kabel in /api/geraete ablesen.
+                "&bild_us=" + String(bildUs) + "&heap=" + String(ESP.getFreeHeap());
   if (!http.begin(pfad))
     return;
 
