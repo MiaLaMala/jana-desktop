@@ -47,6 +47,9 @@
 #include <WiFi.h>
 #include <WiFiManager.h>
 #include <XPT2046_Touchscreen.h>
+#include <Preferences.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
 #include <time.h>
 
 // --- Farben nach DESIGN.md ------------------------------------------------
@@ -183,6 +186,55 @@ String letzterFehler = "";
 
 int ansicht = 0;
 const int ANSICHTEN = 4;
+
+// --- Updates ueber die Luft -----------------------------------------------
+//
+// Das Geraet fragt Mia OS, nicht GitHub: das Repo ist privat, und ein
+// Schluessel im Flash waere auslesbar. Gefragt wird beim ohnehin laufenden
+// Termin-Abruf mit, ein eigener Takt waere Last ohne Gewinn.
+
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "0.0.0"
+#endif
+
+// Wie lange "Spaeter" gilt. Vier Stunden sind lang genug, um in Ruhe zu
+// arbeiten, und kurz genug, dass ein Update nicht vergessen wird.
+const uint32_t SPAETER_MS = 4UL * 60 * 60 * 1000;
+
+struct Update_t {
+  String version;      // was bereitsteht
+  String abgelehnt;    // diese Nummer hat Mia weggeklickt
+  uint32_t spaeterBis = 0;
+  bool gefragt = false;  // Dialog steht gerade auf dem Schirm
+  bool laeuft = false;   // wird gerade geflasht
+  int prozent = 0;
+  String fehler;
+};
+Update_t neuling;
+
+Preferences merker;
+
+void updateBalkenZeichnen();
+void updateDialogZeichnen();
+
+/** Versionen wie 0.1.7 vergleichen. Gibt >0, wenn a neuer als b ist. */
+int versionVergleich(const String &a, const String &b) {
+  int ai = 0, bi = 0;
+  for (int teil = 0; teil < 3; teil++) {
+    int az = 0, bz = 0;
+    while (ai < (int)a.length() && a[ai] >= '0' && a[ai] <= '9')
+      az = az * 10 + (a[ai++] - '0');
+    while (bi < (int)b.length() && b[bi] >= '0' && b[bi] <= '9')
+      bz = bz * 10 + (b[bi++] - '0');
+    if (az != bz)
+      return az - bz;
+    if (ai < (int)a.length())
+      ai++;  // Punkt ueberspringen
+    if (bi < (int)b.length())
+      bi++;
+  }
+  return 0;
+}
 bool neuZeichnen = true;
 uint8_t helligkeit = HELL_TAG;
 
@@ -298,6 +350,148 @@ bool holen(const char *pfad, JsonDocument &doc, JsonDocument &filter) {
     letzterFehler = String("JSON: ") + fehler.c_str();
     return false;
   }
+  return true;
+}
+
+/**
+ * Nachsehen, ob eine neuere Fassung bereitsteht.
+ *
+ * Meldet dabei gleich, wer fragt: Mia OS fuehrt daraus seine Geraeteliste,
+ * ohne dass es dafuer einen eigenen Abruf braucht.
+ */
+void updatePruefen() {
+  if (WiFi.status() != WL_CONNECTED || neuling.laeuft)
+    return;
+
+  HTTPClient http;
+  http.setTimeout(8000);
+  http.setConnectTimeout(5000);
+
+  String pfad = String(basisUrl) + "/api/firmware/neueste?kennung=" +
+                WiFi.macAddress() + "&name=Jana-Display&version=" + FIRMWARE_VERSION;
+  if (!http.begin(pfad))
+    return;
+
+  if (http.GET() != 200) {
+    http.end();
+    return;
+  }
+
+  JsonDocument doc;
+  JsonDocument filter;
+  filter["version"] = true;
+  const DeserializationError fehler =
+      deserializeJson(doc, http.getStream(), DeserializationOption::Filter(filter));
+  http.end();
+  if (fehler)
+    return;
+
+  const String draussen = doc["version"].as<String>();
+  if (draussen.isEmpty())
+    return;
+
+  // Nur fragen, wenn es wirklich neuer ist. Gleich oder aelter heisst:
+  // nichts zu tun. Ein Dialog fuer dieselbe Nummer waere Gehupe.
+  if (versionVergleich(draussen, FIRMWARE_VERSION) <= 0) {
+    neuling.version = "";
+    return;
+  }
+
+  // Diese Nummer hat Mia bereits weggeklickt.
+  if (draussen == neuling.abgelehnt)
+    return;
+
+  neuling.version = draussen;
+}
+
+/**
+ * Die neue Fassung holen und in den freien Speicherplatz schreiben.
+ *
+ * Der ESP32 hat zwei Plaetze fuer Programme. Geschrieben wird immer in den
+ * gerade unbenutzten, der laufende bleibt unangetastet. Geht dabei etwas
+ * schief, startet das Geraet einfach wieder mit dem alten.
+ */
+bool updateHolen() {
+  if (WiFi.status() != WL_CONNECTED)
+    return false;
+
+  neuling.laeuft = true;
+  neuling.prozent = 0;
+  neuling.fehler = "";
+
+  HTTPClient http;
+  http.setTimeout(30000);
+  http.setConnectTimeout(8000);
+  if (!http.begin(String(basisUrl) + "/api/firmware/datei")) {
+    neuling.fehler = "Adresse ungueltig";
+    neuling.laeuft = false;
+    return false;
+  }
+
+  if (http.GET() != 200) {
+    neuling.fehler = "Server antwortet nicht";
+    http.end();
+    neuling.laeuft = false;
+    return false;
+  }
+
+  const int groesse = http.getSize();
+  if (groesse <= 0) {
+    neuling.fehler = "Groesse unbekannt";
+    http.end();
+    neuling.laeuft = false;
+    return false;
+  }
+
+  if (!Update.begin(groesse)) {
+    // Haeufigster Grund: der freie Platz ist kleiner als die Datei.
+    neuling.fehler = "Kein Platz";
+    http.end();
+    neuling.laeuft = false;
+    return false;
+  }
+
+  // In Stuecken lesen und dabei zeichnen. Ein Balken, der sich nicht
+  // bewegt, sieht nach Absturz aus, und 1,1 MB dauern ueber WLAN spuerbar.
+  WiFiClient *strom = http.getStreamPtr();
+  uint8_t puffer[1024];
+  int gelesen = 0;
+  uint32_t letztesZeichnen = 0;
+
+  while (http.connected() && gelesen < groesse) {
+    const size_t da = strom->available();
+    if (da) {
+      const int n = strom->readBytes(puffer, min(da, sizeof(puffer)));
+      if (Update.write(puffer, n) != (size_t)n) {
+        neuling.fehler = "Schreibfehler";
+        Update.abort();
+        http.end();
+        neuling.laeuft = false;
+        return false;
+      }
+      gelesen += n;
+      neuling.prozent = (gelesen * 100) / groesse;
+      if (millis() - letztesZeichnen > 200) {
+        letztesZeichnen = millis();
+        updateBalkenZeichnen();
+      }
+    }
+    delay(1);
+  }
+
+  http.end();
+
+  if (!Update.end(true)) {
+    neuling.fehler = "Pruefung fehlgeschlagen";
+    neuling.laeuft = false;
+    return false;
+  }
+
+  // Die neue Fassung gilt als auf Probe: sie muss sich beim ersten Start
+  // bewaehren, sonst faellt das Geraet von selbst zurueck.
+  merker.begin("jana", false);
+  merker.putString("probe", neuling.version);
+  merker.end();
   return true;
 }
 
@@ -806,6 +1000,89 @@ void homelabZeichnen() {
 }
 
 /** Die ganze Anzeige. Wird nur bei Aenderung gezeichnet, nicht im Takt. */
+/**
+ * Der Fortschrittsbalken beim Flashen.
+ *
+ * Bewusst ein eigenes Vollbild statt eines Kastens ueber der Seite: waehrend
+ * geschrieben wird, darf nichts anderes passieren, und das soll man sehen.
+ */
+void updateBalkenZeichnen() {
+  static int letzterProzent = -1;
+  if (neuling.prozent == letzterProzent)
+    return;
+
+  if (letzterProzent < 0) {
+    tft.fillScreen(C_GRUND);
+    tft.setTextDatum(TC_DATUM);
+    tft.setTextColor(C_TEXT, C_GRUND);
+    tft.drawString("Wird geladen", BREIT / 2, 72, 4);
+    tft.setTextColor(C_GEDAEMPFT, C_GRUND);
+    tft.drawString("Version " + neuling.version, BREIT / 2, 104, 2);
+    tft.drawString("Strom nicht trennen", BREIT / 2, 190, 2);
+  }
+  letzterProzent = neuling.prozent;
+
+  const int x = 40, y = 136, breit = BREIT - 80, hoch = 14;
+  tft.drawRoundRect(x, y, breit, hoch, 4, C_LINIE);
+  tft.fillRoundRect(x + 2, y + 2, ((breit - 4) * neuling.prozent) / 100, hoch - 4, 3,
+                    C_AKZENT);
+
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(C_TEXT, C_GRUND);
+  tft.drawString(String(neuling.prozent) + " %", BREIT / 2, y + 24, 2);
+}
+
+/**
+ * Der Dialog: was laeuft, was kaeme, und drei Knoepfe.
+ *
+ * Liegt ueber der Seite statt sie zu ersetzen. Mia soll sehen, was das
+ * Geraet gerade anzeigt, waehrend sie entscheidet.
+ */
+void updateDialogZeichnen() {
+  const int x = 26, y = 40, breit = BREIT - 52, hoch = 164;
+
+  // Schatten als Andeutung von Hoehe, damit der Kasten nicht wie ein
+  // Teil der Seite aussieht.
+  tft.fillRoundRect(x + 3, y + 3, breit, hoch, 10, C_GRUND);
+  tft.fillRoundRect(x, y, breit, hoch, 10, C_ERHOBEN);
+  tft.drawRoundRect(x, y, breit, hoch, 10, C_AKZENT);
+
+  tft.setTextDatum(TC_DATUM);
+  tft.setTextColor(C_TEXT, C_ERHOBEN);
+  tft.drawString("Neue Version da", BREIT / 2, y + 14, 4);
+
+  // Alt und neu untereinander, Werte ausgerichtet: so sieht man den
+  // Unterschied, ohne zu lesen.
+  tft.setTextDatum(TR_DATUM);
+  tft.setTextColor(C_GEDAEMPFT, C_ERHOBEN);
+  tft.drawString("jetzt", BREIT / 2 - 12, y + 54, 2);
+  tft.drawString("neu", BREIT / 2 - 12, y + 78, 2);
+
+  tft.setTextDatum(TL_DATUM);
+  tft.drawString(FIRMWARE_VERSION, BREIT / 2 + 4, y + 54, 2);
+  tft.setTextColor(C_AKZENT, C_ERHOBEN);
+  tft.drawString(neuling.version, BREIT / 2 + 4, y + 78, 2);
+
+  // Drei Knoepfe nebeneinander. Ja hat Farbe, die anderen nicht: die
+  // haeufigste Antwort soll am leichtesten zu treffen sein.
+  const int ky = y + 112, kh = 36, abstand = 8;
+  const int kb = (breit - 2 * 14 - 2 * abstand) / 3;
+  const int k1 = x + 14, k2 = k1 + kb + abstand, k3 = k2 + kb + abstand;
+
+  tft.fillRoundRect(k1, ky, kb, kh, 6, C_AKZENT);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(C_TEXT, C_AKZENT);
+  tft.drawString("Ja", k1 + kb / 2, ky + kh / 2, 2);
+
+  for (int i = 0; i < 2; i++) {
+    const int kx = i == 0 ? k2 : k3;
+    tft.fillRoundRect(kx, ky, kb, kh, 6, C_FLAECHE);
+    tft.drawRoundRect(kx, ky, kb, kh, 6, C_LINIE);
+    tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
+    tft.drawString(i == 0 ? "Spaeter" : "Nein", kx + kb / 2, ky + kh / 2, 2);
+  }
+}
+
 void anzeigeZeichnen() {
   tft.fillScreen(C_GRUND);
   kopfZeichnen();
@@ -917,6 +1194,8 @@ void ledPruefen() {
  */
 // Auf welche Seite oben getippt wurde, -1 fuer keine.
 int tippZiel = -1;
+// Was im Update-Dialog getippt wurde: 1 Ja, 2 Spaeter, 3 Nein, 0 nichts.
+int antwort = 0;
 
 int wischen() {
   static bool lag_an = false;
@@ -926,6 +1205,7 @@ int wischen() {
   static int punkte = 0;
 
   tippZiel = -1;
+  antwort = 0;
   const bool an = touch.tirqTouched() && touch.touched();
 
   if (an) {
@@ -972,6 +1252,26 @@ int wischen() {
 
   // Kurz und fast ohne Weg heisst: getippt.
   if (abs(wegX) < TIPP_WEG && abs(wegY) < TIPP_WEG) {
+    // Steht der Update-Dialog, gehoert jeder Tipp ihm. Ein Seitenwechsel
+    // unter einem offenen Dialog waere verwirrend.
+    if (neuling.gefragt) {
+      const int x = 26, y = 40, breit = BREIT - 52;
+      const int ky = y + 112, kh = 36, abstand = 8;
+      const int kb = (breit - 2 * 14 - 2 * abstand) / 3;
+      const int k1 = x + 14, k2 = k1 + kb + abstand, k3 = k2 + kb + abstand;
+
+      if (startY >= ky && startY <= ky + kh) {
+        if (startX >= k1 && startX <= k1 + kb) {
+          antwort = 1;  // Ja
+        } else if (startX >= k2 && startX <= k2 + kb) {
+          antwort = 2;  // Spaeter
+        } else if (startX >= k3 && startX <= k3 + kb) {
+          antwort = 3;  // Nein
+        }
+      }
+      return 0;
+    }
+
     // Oben auf einen der Punkte: direkt auf diese Seite springen.
     if (startY < KOPF_H + 8) {
       for (int i = 0; i < ANSICHTEN; i++) {
@@ -1110,11 +1410,74 @@ void setup() {
 
   briefingHolen();
   homelabHolen();
+
+  // Die neue Fassung hat sich bewaehrt: WLAN steht und Mia OS hat
+  // geantwortet. Ohne diese Bestaetigung faellt das Geraet beim naechsten
+  // Neustart von selbst auf die vorherige zurueck. Genau das soll es auch,
+  // wenn eine Fassung hier nicht ankommt.
+  if (habenDaten) {
+    const esp_partition_t *laeuft = esp_ota_get_running_partition();
+    esp_ota_img_states_t zustand;
+    if (esp_ota_get_state_partition(laeuft, &zustand) == ESP_OK &&
+        zustand == ESP_OTA_IMG_PENDING_VERIFY) {
+      esp_ota_mark_app_valid_cancel_rollback();
+      Serial.printf("[jana-display] Version %s bestaetigt\n", FIRMWARE_VERSION);
+      merker.begin("jana", false);
+      merker.remove("probe");
+      merker.end();
+    }
+  }
+
+  // Was Mia zuletzt abgelehnt hat, gilt weiter.
+  merker.begin("jana", true);
+  neuling.abgelehnt = merker.getString("abgelehnt", "");
+  merker.end();
+
+  updatePruefen();
   neuZeichnen = true;
 }
 
 void loop() {
   const int wisch = wischen();
+
+  // Der Dialog hat Vorrang: solange er steht, wird nicht geblaettert.
+  if (antwort != 0) {
+    if (antwort == 1) {
+      if (updateHolen()) {
+        tft.fillScreen(C_GRUND);
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextColor(C_TEXT, C_GRUND);
+        tft.drawString("Neustart", BREIT / 2, 120, 4);
+        delay(800);
+        ESP.restart();
+      }
+      // Fehlgeschlagen: kurz zeigen, warum, dann weitermachen wie bisher.
+      tft.fillScreen(C_GRUND);
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(C_FEHLER, C_GRUND);
+      tft.drawString("Update fehlgeschlagen", BREIT / 2, 108, 2);
+      tft.setTextColor(C_GEDAEMPFT, C_GRUND);
+      tft.drawString(neuling.fehler, BREIT / 2, 134, 2);
+      delay(3000);
+      neuling.spaeterBis = millis() + SPAETER_MS;
+    } else if (antwort == 2) {
+      neuling.spaeterBis = millis() + SPAETER_MS;
+    } else if (antwort == 3) {
+      // Diese Nummer nie wieder anbieten. Ueberlebt den Neustart, sonst
+      // steht der Dialog nach jedem Stromausfall wieder da.
+      neuling.abgelehnt = neuling.version;
+      merker.begin("jana", false);
+      merker.putString("abgelehnt", neuling.abgelehnt);
+      merker.end();
+      neuling.version = "";
+    }
+    neuling.gefragt = false;
+    neuling.laeuft = false;
+    antwort = 0;
+    neuZeichnen = true;
+    return;
+  }
+
   if (wisch != 0) {
     ansicht = (ansicht + wisch + ANSICHTEN) % ANSICHTEN;
     uebergang(wisch);
@@ -1130,6 +1493,9 @@ void loop() {
     const bool stoerungVorher = stoerungAktiv();
     briefingHolen();
     homelabHolen();
+    // Im selben Takt mitgefragt: Mia OS erfaehrt dabei, dass es dieses
+    // Geraet gibt und welche Fassung laeuft.
+    updatePruefen();
     // Auch bei Misserfolg neu zeichnen: der Punkt oben rechts und das
     // "vor X min" sind dann die eigentliche Information.
     neuZeichnen = true;
@@ -1162,6 +1528,16 @@ void loop() {
   if (neuZeichnen) {
     neuZeichnen = false;
     anzeigeZeichnen();
+    if (neuling.gefragt)
+      updateDialogZeichnen();
+  }
+
+  // Fragen, wenn etwas bereitsteht und gerade nichts dagegen spricht.
+  const bool ruhe = !stoerungAktiv() && laeuftGerade() == nullptr;
+  if (!neuling.gefragt && !neuling.version.isEmpty() && ruhe &&
+      millis() > neuling.spaeterBis) {
+    neuling.gefragt = true;
+    updateDialogZeichnen();
   }
 
   delay(20);
