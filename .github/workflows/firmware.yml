@@ -28,6 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Ohne volle Historie zaehlt "git rev-list --count" nur einen
+          # Commit, und jede gebaute Fassung hiesse 0.1.1.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -46,6 +50,15 @@ jobs:
 
       - name: PlatformIO installieren
         run: pip install --upgrade platformio
+
+      # Dieselbe Regel wie display/version_bauen.py und wie Mia OS:
+      # MAJOR.MINOR aus version.txt, Patch ist die Commit-Zahl.
+      - name: Version bestimmen
+        run: |
+          BASIS=$(cat display/version.txt)
+          ANZAHL=$(git rev-list --count HEAD)
+          echo "version=${BASIS}.${ANZAHL}" >> "$GITHUB_ENV"
+          echo "Version: ${BASIS}.${ANZAHL}"
 
       - name: Bauen
         working-directory: display
@@ -85,17 +98,21 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: bau-${{ github.run_number }}
-          name: Bau ${{ github.run_number }}
+          tag_name: v${{ env.version }}
+          name: ${{ env.version }}
           body: |
             Firmware fuer das Jana-Display (ESP32-2432S028).
 
+            Version: ${{ env.version }}
             Flash: ${{ env.flash_prozent }} Prozent belegt.
             Commit: ${{ github.sha }}
 
-            Flashen am Mac:
+            Das Display fragt selbst nach und meldet sich, wenn diese
+            Fassung neuer ist als die laufende.
+
+            Ueber Kabel flashen:
             ```bash
-            cd ~/projekte/jana-desktop/display
+            cd ~/git/jana-desktop/display
             git pull
             pio run -t upload
             ```

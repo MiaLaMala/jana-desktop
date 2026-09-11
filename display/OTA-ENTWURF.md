@@ -5,8 +5,23 @@ Stand 11.09.2026. Entwurf, noch nicht gebaut.
 Das Display soll selbst merken, wenn eine neue Fassung da ist, und fragen,
 bevor es sie nimmt. Mias Ablauf:
 
-> Popup „Neue Version verfügbar", alte Nummer, neue Nummer, und dann ja,
-> nein oder später.
+> Popup „Neue Version da", alte Nummer, neue Nummer, und dann ja, nein
+> oder später.
+
+## Die Nummer
+
+Dieselbe Regel wie Mia OS: **`MAJOR.MINOR.<Anzahl Commits>`**. Major und
+Minor stehen in `display/version.txt` und werden von Hand gesetzt, der
+dritte Teil zählt sich selbst hoch.
+
+Warum nicht einfach durchnummerierte Bauten: Die Geräte und der Server
+gehören zusammen. Wer `0.1.7` auf dem Display liest, soll das ohne
+Umrechnen neben `0.2.108` in der Oberfläche halten können. Zwei Schemata
+für dasselbe System wären eine Quelle für Missverständnisse.
+
+Die Nummer kommt beim Bauen als Compilerschalter in die Firmware
+(`display/version_bauen.py`), das Gerät weiß also selbst, welche Fassung
+es ist. Der Release-Tag heißt `v0.1.7`, genau wie bei Mia OS.
 
 ---
 
@@ -55,10 +70,10 @@ Gerät, das ständig fragt, erzeugt Last ohne Nutzen.
 **Fragen** in einem Kasten über der laufenden Seite:
 
 ```
-        Neue Fassung da
+        Neue Version da
 
-        jetzt:  Bau 3
-        neu:    Bau 7
+        jetzt:  0.1.3
+        neu:    0.1.7
 
     [ Ja ]  [ Später ]  [ Nein ]
 ```
