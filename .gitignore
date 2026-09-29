@@ -23,3 +23,6 @@ __pycache__/
 *.pyc
 .venv/
 .superpowers/
+
+# Impeccable: Entwuerfe und Pruefbilder (gross, mit Beispieldaten)
+.impeccable/
