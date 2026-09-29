@@ -195,7 +195,6 @@ struct Briefing {
   int faelligAnzahl = 0;
   // Alle faelligen, nicht nur die sechs, die als Zeile Platz haben.
   int faelligGesamt = 0;
-  int ueberGesamt = 0;
   int offen = 0;
   // Der aelteste offene Hinweis, den Mia OS auf den Tisch legen will.
   int hinweisId = 0;
@@ -870,7 +869,6 @@ bool briefingHolen() {
     const bool ueber =
         datum.length() == 10 && frisch.datum.length() == 10 && datum < frisch.datum;
     frisch.faelligGesamt++;
-    frisch.ueberGesamt += ueber;
     if (frisch.faelligAnzahl >= MAX_ZEILEN)
       continue;
     frisch.ueberfaellig[frisch.faelligAnzahl] = ueber;
@@ -940,7 +938,7 @@ bool homelabHolen() {
   // Namen werden gekuerzt: "Arbeitsspeicher" passt nicht in eine 90 Pixel
   // breite Spalte, "RAM" schon.
   const char *gewollt[] = {"Arbeitsspeicher", "Prozessor", "Antwortzeit", "Vollster Speicher"};
-  const char *kurz[] = {"RAM", "CPU", "Antwort", "vollste Platte"};
+  const char *kurz[] = {"RAM", "CPU", "Antwort", "Platte"};
   for (JsonObject k : doc["kennzahlen"].as<JsonArray>()) {
     if (frisch.zahlAnzahl >= 4)
       break;
@@ -1010,35 +1008,6 @@ const Termin *kommtAlsNaechstes() {
   return beste;
 }
 
-/** Ein Balken, der einen Anteil zeigt. Grundlage fuer Fortschritt und Tag. */
-void balken(int x, int y, int breite, int hoehe, float anteil, uint16_t farbe) {
-  if (anteil < 0)
-    anteil = 0;
-  if (anteil > 1)
-    anteil = 1;
-  tft.fillRoundRect(x, y, breite, hoehe, hoehe / 2, C_LINIE);
-  const int voll = (int)(breite * anteil);
-  if (voll > hoehe)
-    tft.fillRoundRect(x, y, voll, hoehe, hoehe / 2, farbe);
-}
-
-/**
- * Die Startseite: links die Uhr, rechts was ansteht.
- *
- * Das Querformat macht hier den Unterschied. Hochkant standen Uhr, laufender
- * Termin und naechster Termin untereinander und drueckten sich gegenseitig
- * aus dem Bild. Nebeneinander hat die Uhr Platz, gross genug, um sie vom
- * anderen Ende des Zimmers zu lesen, und die Termine haben eine eigene
- * Spalte.
- */
-/** Kleiner Farbpunkt mit Text daneben, fuer Hinweise wie "2 fällig". */
-void punktZeile(int x, int y, const String &text, uint16_t farbe, uint16_t grund) {
-  tft.setFreeFont(S_NORMAL);
-  tft.fillCircle(x + 3, y + 9, 3, farbe);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(farbe, grund);
-  tft.drawString(text, x + 12, y);
-}
 
 /**
  * Die Startseite (0.3, Entwurf C2 vom 29.09.2026): oben links die Uhr, rechts
@@ -1132,22 +1101,23 @@ void jetztZeichnen() {
     fakt(fx, 8, fb, "heute", "Nichts mehr.", C_GEDAEMPFT);
 
   if (briefing.faelligGesamt > 0) {
-    const int n = briefing.faelligGesamt, ueber = briefing.ueberGesamt;
-    fakt(fx, 60, fb, ueber ? "fällig, " + String(ueber) + " davon über" : String("fällig"),
-         String(n) + (n == 1 ? " Aufgabe" : " Aufgaben"), C_ACHTUNG);
+    const int n = briefing.faelligGesamt;
+    // Nur die Zahl. Wie viel davon ueberfaellig ist, steht auf der
+    // Heute-Seite; hier waere es eine Mahnung bei jedem Blick.
+    fakt(fx, 58, fb, "fällig", String(n) + (n == 1 ? " Aufgabe" : " Aufgaben"), C_ACHTUNG);
   } else {
-    fakt(fx, 60, fb, "fällig", "nichts", C_GEDAEMPFT);
+    fakt(fx, 58, fb, "fällig", "nichts", C_GEDAEMPFT);
   }
 
   if (!homelab.gueltig)
-    fakt(fx, 96, fb, "Homelab", "keine Daten", C_LEISE);
+    fakt(fx, 104, fb, "Homelab", "keine Daten", C_LEISE);
   else if (stoerungAktiv() && homelab.stoerAnzahl > 0)
-    fakt(fx, 96, fb, "Homelab, weg:",
+    fakt(fx, 104, fb, "Homelab, weg:",
          homelab.stoerAnzahl > 1 ? homelab.stoerung[0] + " +" + String(homelab.stoerAnzahl - 1)
                                  : homelab.stoerung[0],
          C_FEHLER);
   else
-    fakt(fx, 96, fb, "Homelab", "alles läuft", C_GEDAEMPFT);
+    fakt(fx, 104, fb, "Homelab", "alles läuft", C_GEDAEMPFT);
 
   // --- Das Lineal ------------------------------------------------------
   // Spanne: vom ersten bis zum letzten Termin des Tages, mindestens 07:30
@@ -1204,8 +1174,10 @@ void jetztZeichnen() {
   // Die Jetzt-Linie, das einzige kraeftige Rot auf dem Bildschirm, wenn
   // gerade nichts laeuft.
   if (linealDa && jetztMin >= von && jetztMin <= bis) {
-    tft.fillRect(jx - 1, LINEAL_Y - 40, 2, 44, C_AKZENT);
-    tft.fillTriangle(jx - 4, LINEAL_Y - 44, jx + 3, LINEAL_Y - 44, jx, LINEAL_Y - 40, C_AKZENT);
+    // Oben endet sie unter den Fakten (Homelab-Wert bis y 133), sonst
+    // schneidet sie nachmittags durch den Text.
+    tft.fillRect(jx - 1, LINEAL_Y - 30, 2, 34, C_AKZENT);
+    tft.fillTriangle(jx - 4, LINEAL_Y - 34, jx + 3, LINEAL_Y - 34, jx, LINEAL_Y - 30, C_AKZENT);
   }
 
   // Unten eine leise Zeile: was morgen als erstes kommt. Wer nachmittags
@@ -1218,63 +1190,60 @@ void jetztZeichnen() {
   }
   tft.setFreeFont(S_KLEIN);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(C_LEISE, C_GRUND);
-  if (morgen)
+  // Sind die Daten alt, sagt die Zeile, woran es liegt. Die Startseite hat
+  // keinen Kopf mit Punkt, das hier ist ihr einziger Hinweis.
+  const bool alt = millis() - letzterErfolg >= VERALTET_MS;
+  if (lage != LAGE_OK || alt) {
+    const char *grund = lage == LAGE_KEIN_WLAN     ? "Kein WLAN, Daten sind alt."
+                        : lage == LAGE_KEIN_TUNNEL ? "Tunnel weg, Daten sind alt."
+                        : lage == LAGE_KEIN_SERVER ? "Mia OS antwortet nicht, Daten sind alt."
+                                                   : "Daten älter als zehn Minuten.";
+    tft.setTextColor(C_ACHTUNG, C_GRUND);
+    tft.drawString(grund, 12, 220);
+  } else if (morgen) {
+    tft.setTextColor(C_LEISE, C_GRUND);
     tft.drawString(passend("morgen " + morgen->zeit + "  " + morgen->titel, BREIT - 24), 12, 220);
+  }
 }
 
 /** Die Kopfzeile: welche Seite, und wie frisch die Daten sind. */
-uint16_t seitenFarbe() {
-  // Jede Seite hat ihren eigenen Ton. Man sieht am Rand, wo man ist,
-  // ohne die Ueberschrift zu lesen.
-  switch (ansicht) {
-  case 0: return C_AKZENT;
-  case 1: return C_AKZENT;
-  case 2: return C_KAL_WOHNEN;
-  default: return stoerungAktiv() ? C_ACHTUNG : C_GUT;
-  }
-}
 
 void kopfZeichnen() {
   static const char *namen[] = {"Jetzt", "Heute", "Morgen", "Homelab"};
-  const uint16_t ton = seitenFarbe();
-  tft.fillRect(0, 0, BREIT, KOPF_H, C_FLAECHE);
-  // Farbiger Balken statt grauer Linie: der Seitenton zieht sich durch.
-  tft.fillRect(0, KOPF_H, BREIT, 2, ton);
-
   tft.setFreeFont(S_FETT);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(C_TEXT, C_FLAECHE);
-  tft.drawString(namen[ansicht], 12, 6);
+  tft.setTextColor(C_TEXT, C_GRUND);
+  tft.drawString(namen[ansicht], 12, 8);
 
-  // Der Punkt rechts oben sagt ohne Worte, woran man ist: gruen frisch,
-  // gelb aelter als zehn Minuten, rot gar keine Verbindung.
-  uint16_t farbe = C_FEHLER;
-  if (habenDaten)
-    farbe = (millis() - letzterErfolg) < VERALTET_MS ? C_GUT : C_ACHTUNG;
-  tft.fillCircle(BREIT - 14, 17, 4, farbe);
-
-  // Die Punkte zeigen, auf welcher Seite man ist. Ohne sie weiss niemand,
-  // dass es ueberhaupt mehr als eine gibt.
+  // Die Punkte zeigen, auf welcher Seite man ist. Gleiche x-Werte wie beim
+  // Antippen (BREIT - 100 + i * 16), sonst trifft der Finger daneben.
   for (int i = 0; i < ANSICHTEN; i++) {
     const int x = BREIT - 100 + i * 16;
-    if (i == ansicht) {
-      tft.fillRoundRect(x - 6, 14, 16, 6, 3, ton);
-    } else {
-      tft.fillCircle(x, 17, 3, C_LINIE);
-    }
+    if (i == ansicht)
+      tft.fillRoundRect(x - 5, 15, 12, 5, 2, C_TEXT);
+    else
+      tft.fillCircle(x, 17, 2, C_LINIE);
   }
+
+  // Dunkel heisst in Ordnung: der Punkt erscheint nur, wenn die Daten alt
+  // sind (orange) oder gar keine Verbindung besteht (Fehlerfarbe).
+  if (!habenDaten)
+    tft.fillCircle(BREIT - 14, 17, 3, C_FEHLER);
+  else if (millis() - letzterErfolg >= VERALTET_MS)
+    tft.fillCircle(BREIT - 14, 17, 3, C_ACHTUNG);
 }
 
 /**
- * Die Terminseiten, heute und morgen, in zwei Spalten.
+ * Die Terminseiten, heute und morgen, als Liste ohne Kaesten.
  *
- * Sieben Termine passen quer nicht untereinander. Zwei Spalten zu drei
- * Zeilen schon, und die Uhrzeiten stehen dabei immer noch untereinander,
- * so dass das Auge sie der Reihe nach findet. Unter den Terminen, wenn
- * Platz ist: die faelligen Aufgaben mit Titel.
+ * Eine Zeile je Termin: Kalenderfarbe als Punkt, Uhrzeit, Titel. Vorbei ist
+ * leise, was laeuft ist rot und sagt rechts, wie lange noch. Darunter, durch
+ * eine Haarlinie getrennt, die faelligen Aufgaben: so viele, wie Platz haben,
+ * der Rest als Zahl. Faellig ist orange, auch wenn es ueberfaellig ist: die
+ * Liste soll erinnern, nicht schimpfen.
  */
-// Wo die Faellig-Zeilen auf der Heute-Seite stehen, fuer das Antippen.
+// Wo die Faellig-Zeilen auf der Heute-Seite stehen, fuer das Halten.
+const int FAELLIG_H = 17;
 int faelligY[MAX_ZEILEN];
 int faelligZeilen = 0;
 
@@ -1284,169 +1253,152 @@ void termineZeichnen() {
   const int anzahl = istHeute ? briefing.heuteAnzahl : briefing.morgenAnzahl;
   const int gesamt = istHeute ? briefing.heuteGesamt : briefing.morgenGesamt;
   const Termin *laeuft = istHeute ? laeuftGerade() : nullptr;
+  const int jetztMin = istHeute ? jetztMinuten() : -1;
+  const int ZEILE = 22;
 
-  int y = KOPF_H + 8;
-
+  int y = 40;
+  tft.setTextDatum(TL_DATUM);
   if (anzahl == 0) {
-    tft.setFreeFont(S_GROSS);
-    tft.setTextDatum(TL_DATUM);
+    tft.setFreeFont(S_NORMAL);
     tft.setTextColor(C_GEDAEMPFT, C_GRUND);
-    tft.drawString(istHeute ? "Keine Termine heute" : "Morgen nichts", 12, y + 6);
-    y += 44;
-  } else {
-    const int spalten = anzahl > 3 ? 2 : 1;
-    const int sp_breite = (BREIT - 16 - (spalten - 1) * 8) / spalten;
-    const int zeilen = (anzahl + spalten - 1) / spalten;
-    const int z_hoehe = min(46, (FUSS_Y - KOPF_H - 16) / max(zeilen, 1));
+    tft.drawString(istHeute ? "Keine Termine heute." : "Morgen ist nichts eingetragen.", 12, y);
+    y += ZEILE;
+  }
+  for (int i = 0; i < anzahl; i++) {
+    const Termin &t = liste[i];
+    const bool aktiv = &t == laeuft;
+    const bool vorbei = istHeute && t.endeMin >= 0 && jetztMin >= t.endeMin;
+    const uint16_t zeitFarbe = aktiv ? C_AKZENT : vorbei ? C_LEISE : C_GEDAEMPFT;
+    const uint16_t titelFarbe = vorbei ? C_LEISE : C_TEXT;
 
-    for (int i = 0; i < anzahl; i++) {
-      const Termin &t = liste[i];
-      const bool aktiv = &t == laeuft;
-      const int sp = i / zeilen;
-      const int ze = i % zeilen;
-      const int x = 8 + sp * (sp_breite + 8);
-      const int ky = y + ze * z_hoehe;
-      const int kh = z_hoehe - 4;
-      const uint16_t grund = aktiv ? C_ERHOBEN : C_FLAECHE;
+    tft.fillCircle(15, y + 8, 2, vorbei ? C_LINIE : t.farbe);
+    tft.setFreeFont(S_NORMAL);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(zeitFarbe, C_GRUND);
+    tft.drawString(t.zeit.length() ? t.zeit : "ganz", 26, y);
 
-      tft.fillRoundRect(x, ky, sp_breite, kh, 6, grund);
-      // Der Streifen links traegt die Kalenderfarbe. Was gerade laeuft, hat
-      // zusaetzlich den helleren Grund.
-      tft.fillRoundRect(x, ky, 4, kh, 2, t.farbe);
-
+    int rechts = BREIT - 12;
+    if (aktiv) {
+      const String rest = "noch " + alsDauer(t.endeMin - jetztMin);
       tft.setFreeFont(S_KLEIN);
-      tft.setTextDatum(TL_DATUM);
-      tft.setTextColor(aktiv ? C_AKZENT : C_GEDAEMPFT, grund);
-      tft.drawString(t.zeit.length() ? t.zeit : "ganztags", x + 12, ky + 5);
-
-      if (t.ende.length() && kh >= 40) {
-        tft.setTextDatum(TR_DATUM);
-        tft.drawString("bis " + t.ende, x + sp_breite - 10, ky + 5);
-      }
-
-      tft.setFreeFont(spalten == 1 ? S_FETT : S_NORMAL);
-      tft.setTextDatum(TL_DATUM);
-      tft.setTextColor(C_TEXT, grund);
-      tft.drawString(passend(t.titel, sp_breite - 22), x + 12, ky + (spalten == 1 ? 18 : 20));
-    }
-    y += zeilen * z_hoehe + 2;
-
-    if (gesamt > anzahl) {
+      tft.setTextDatum(TR_DATUM);
+      tft.setTextColor(C_AKZENT, C_GRUND);
+      tft.drawString(rest, rechts, y + 3);
+      rechts -= tft.textWidth(rest) + 10;
+    } else if (!vorbei && t.ende.length()) {
       tft.setFreeFont(S_KLEIN);
-      tft.setTextDatum(TL_DATUM);
-      tft.setTextColor(C_GEDAEMPFT, C_GRUND);
-      tft.drawString("+ " + String(gesamt - anzahl) + " weitere", 12, y);
-      y += 16;
+      tft.setTextDatum(TR_DATUM);
+      tft.setTextColor(C_LEISE, C_GRUND);
+      tft.drawString("bis " + t.ende, rechts, y + 3);
+      rechts -= tft.textWidth("bis " + t.ende) + 10;
     }
+    tft.setFreeFont(S_NORMAL);
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(titelFarbe, C_GRUND);
+    tft.drawString(passend(t.titel, rechts - 84), 84, y);
+    y += ZEILE;
+  }
+  if (gesamt > anzahl) {
+    tft.setFreeFont(S_KLEIN);
+    tft.setTextColor(C_LEISE, C_GRUND);
+    tft.drawString("und " + String(gesamt - anzahl) + " weitere", 84, y);
+    y += 16;
   }
 
-  // Faellige Aufgaben, so viele wie noch Platz haben. Auf der Heute-Seite,
-  // weil sie dorthin gehoeren, wo der Tag geplant wird. Morgen zeigt sie
-  // nicht: was morgen faellig ist, weiss Mia OS heute noch nicht.
+  // Faellige Aufgaben. Nur auf der Heute-Seite: was morgen faellig ist,
+  // weiss Mia OS heute noch nicht.
   faelligZeilen = 0;
-  if (istHeute && briefing.faelligAnzahl > 0) {
-    tft.setFreeFont(S_KLEIN);
-    for (int i = 0; i < briefing.faelligAnzahl && y + 15 <= FUSS_Y - 2; i++) {
-      faelligY[i] = y;
-      faelligZeilen = i + 1;
-      const uint16_t farbe = briefing.ueberfaellig[i] ? C_FEHLER : C_ACHTUNG;
-      tft.fillCircle(15, y + 7, 3, farbe);
-      tft.setTextDatum(TL_DATUM);
-      // Regel 21: was ueber 30 Tage liegt, wurde exportiert. Antippen holt
-      // es zurueck, das ist die Funktion hinter dem Witz.
-      if (briefing.begraben[i]) {
-        tft.setTextColor(C_GEDAEMPFT, C_GRUND);
-        tft.drawString("als .zip in die Friedhofsgärtnerei exportiert", 24, y);
-      } else {
-        tft.setTextColor(C_TEXT, C_GRUND);
-        tft.drawString(passend(briefing.faellig[i], BREIT - 36), 24, y);
-      }
-      y += 15;
+  if (!istHeute || briefing.faelligGesamt == 0)
+    return;
+  y += 4;
+  tft.drawFastHLine(12, y, BREIT - 24, C_LINIE_WEICH);
+  y += 8;
+  const int platz = (HOCH - 6 - y) / FAELLIG_H;
+  const bool rest = briefing.faelligGesamt > platz;
+  const int zeigen = min(briefing.faelligAnzahl, rest ? platz - 1 : platz);
+  tft.setFreeFont(S_KLEIN);
+  tft.setTextDatum(TL_DATUM);
+  for (int i = 0; i < zeigen; i++) {
+    faelligY[i] = y;
+    faelligZeilen = i + 1;
+    tft.fillCircle(15, y + 7, 2, C_ACHTUNG);
+    // Regel 21: was ueber 30 Tage liegt, wurde exportiert. Halten holt es
+    // zurueck, das ist die Funktion hinter dem Witz.
+    if (briefing.begraben[i]) {
+      tft.setTextColor(C_LEISE, C_GRUND);
+      tft.drawString(passend("als .zip in die Friedhofsgärtnerei exportiert", BREIT - 38), 26, y);
+    } else {
+      tft.setTextColor(C_TEXT, C_GRUND);
+      tft.drawString(passend(briefing.faellig[i], BREIT - 38), 26, y);
     }
+    y += FAELLIG_H;
+  }
+  if (rest) {
+    tft.setTextColor(C_ACHTUNG, C_GRUND);
+    tft.drawString("und " + String(briefing.faelligGesamt - zeigen) + " weitere fällig", 26, y);
   }
 }
 
 /**
- * Die Homelab-Seite: links die Zahl, rechts was kaputt ist.
+ * Die Homelab-Seite: erst der Satz, dann was kaputt ist, dann vier Zahlen.
  *
- * Die Reihenfolge ist Absicht. "46 von 47" beantwortet die Frage in einem
- * Blick, und nur wer stehen bleibt, liest daneben, welcher Dienst fehlt.
+ * Bis 0.2 stand hier eine riesige Zahl mit einem Punkteraster. Das war die
+ * Dashboard-Schablone, die nach KI aussieht; "46 von 48" sagt der Satz
+ * darunter genauso, und welcher Dienst fehlt, steht direkt dabei.
  */
 void homelabZeichnen() {
+  tft.setTextDatum(TL_DATUM);
   if (!homelab.gueltig) {
-    tft.setFreeFont(S_NORMAL);
-    tft.setTextDatum(MC_DATUM);
+    tft.setFreeFont(S_GROSS);
     tft.setTextColor(C_GEDAEMPFT, C_GRUND);
-    tft.drawString("Homelab nicht erreichbar", BREIT / 2, 120);
+    tft.drawString("Keine Homelab-Daten.", 12, 44);
     return;
   }
-
   const bool stoerung = stoerungAktiv();
-  const int spalte = 124;
-  tft.drawFastVLine(spalte - 10, KOPF_H + 8, FUSS_Y - KOPF_H - 16, C_LINIE);
-
-  tft.setFreeFont(S_UHR);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(stoerung ? C_ACHTUNG : C_GUT, C_GRUND);
-  tft.drawString(String(homelab.oben), 12, 46);
-
-  tft.setFreeFont(S_KLEIN);
-  tft.setTextColor(C_GEDAEMPFT, C_GRUND);
-  tft.drawString("von " + String(homelab.gesamt) + " Diensten", 12, 88);
-
-  // Ein Raster aus Punkten, einer je Dienst. Das macht aus einer Zahl ein
-  // Bild: 46 gruene Punkte und ein roter sagen dasselbe wie "46 von 47",
-  // aber man sieht den roten sofort.
-  int px = 14, py = 114;
-  for (int i = 0; i < homelab.gesamt && py < 170; i++) {
-    tft.fillCircle(px, py, 2, i < homelab.oben ? C_GUT : C_FEHLER);
-    px += 9;
-    if (px > spalte - 20) {
-      px = 14;
-      py += 10;
-    }
-  }
+  String satz = "Alles läuft.";
+  if (stoerung && homelab.stoerAnzahl == 1)
+    satz = homelab.stoerung[0] + " ist weg.";
+  else if (stoerung && homelab.stoerAnzahl > 1)
+    satz = String(homelab.gesamt - homelab.oben) + " Dienste sind weg.";
+  tft.setFreeFont(S_GROSS);
+  tft.setTextColor(stoerung ? C_FEHLER : C_TEXT, C_GRUND);
+  tft.drawString(passend(satz, BREIT - 24), 12, 42);
 
   tft.setFreeFont(S_KLEIN);
   tft.setTextColor(C_GEDAEMPFT, C_GRUND);
-  tft.drawString(String(homelab.uptime, 1) + " % in 24 h", 12, 184);
+  String unter = String(homelab.oben) + " von " + String(homelab.gesamt) + " Diensten oben, " +
+                 String(homelab.uptime, homelab.uptime < 99.995f ? 2 : 0) + " % in 24 h";
+  unter.replace(".", ",");
+  tft.drawString(passend(unter, BREIT - 24), 12, 70);
 
-  int y = KOPF_H + 8;
+  int y = 94;
   if (stoerung) {
-    for (int i = 0; i < homelab.stoerAnzahl && y < FUSS_Y - 36; i++) {
-      tft.fillRoundRect(spalte, y, BREIT - spalte - 10, 36, 6, C_ERHOBEN);
-      tft.fillRoundRect(spalte, y, 4, 36, 2, C_FEHLER);
+    for (int i = 0; i < homelab.stoerAnzahl && y < 150; i++) {
+      tft.fillCircle(15, y + 8, 2, C_FEHLER);
       tft.setFreeFont(S_NORMAL);
-      tft.setTextDatum(TL_DATUM);
-      tft.setTextColor(C_TEXT, C_ERHOBEN);
-      tft.drawString(passend(homelab.stoerung[i], BREIT - spalte - 32), spalte + 12, y + 3);
+      tft.setTextColor(C_TEXT, C_GRUND);
+      tft.drawString(passend(homelab.stoerung[i], 110), 26, y);
       tft.setFreeFont(S_KLEIN);
-      tft.setTextColor(C_GEDAEMPFT, C_ERHOBEN);
-      tft.drawString(passend(homelab.meldung[i], BREIT - spalte - 32), spalte + 12, y + 21);
-      y += 42;
+      tft.setTextColor(C_GEDAEMPFT, C_GRUND);
+      tft.drawString(passend(homelab.meldung[i], BREIT - 150), 138, y + 3);
+      y += 22;
     }
-  } else {
-    tft.setFreeFont(S_GROSS);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(C_GUT, C_GRUND);
-    tft.drawString("Alles läuft", spalte, y + 2);
-    y += 40;
   }
 
-  // Die Kennzahlen in zwei Spalten. Label klein darueber, Wert darunter:
-  // beim Ueberfliegen sucht das Auge die Zahl, nicht das Wort.
-  const int k_breite = (BREIT - spalte - 10) / 2;
-  for (int i = 0; i < homelab.zahlAnzahl && y + 30 <= FUSS_Y; i++) {
-    const int x = spalte + (i % 2) * k_breite;
+  // Vier Zahlen in einer Reihe, unten. Label leise darueber, Wert darunter.
+  const int reihe = HOCH - 44;
+  tft.drawFastHLine(12, reihe - 10, BREIT - 24, C_LINIE_WEICH);
+  const int spalte = (BREIT - 24) / 4;
+  for (int i = 0; i < homelab.zahlAnzahl; i++) {
+    const int x = 12 + i * spalte;
     tft.setFreeFont(S_KLEIN);
-    tft.setTextDatum(TL_DATUM);
-    tft.setTextColor(C_GEDAEMPFT, C_GRUND);
-    tft.drawString(passend(homelab.zahlLabel[i], k_breite - 8), x, y);
+    tft.setTextColor(C_LEISE, C_GRUND);
+    tft.drawString(passend(homelab.zahlLabel[i], spalte - 6), x, reihe);
+    String wert = homelab.zahlWert[i];
+    wert.replace(".", ",");
     tft.setFreeFont(S_NORMAL);
     tft.setTextColor(C_TEXT, C_GRUND);
-    tft.drawString(homelab.zahlWert[i], x, y + 13);
-    if (i % 2)
-      y += 36;
+    tft.drawString(passend(wert, spalte - 6), x, reihe + 14);
   }
 }
 
@@ -1477,7 +1429,7 @@ void updateBalkenZeichnen() {
   const int x = 40, y = 136, breit = BREIT - 80, hoch = 14;
   tft.drawRoundRect(x, y, breit, hoch, 4, C_LINIE);
   tft.fillRoundRect(x + 2, y + 2, ((breit - 4) * neuling.prozent) / 100, hoch - 4, 3,
-                    C_AKZENT);
+                    C_TEXT);
 
   tft.setFreeFont(S_NORMAL);
   tft.setTextDatum(TC_DATUM);
@@ -1503,9 +1455,8 @@ void updateDialogZeichnen() {
   // Schatten als Andeutung von Hoehe, damit der Kasten nicht wie ein
   // Teil der Seite aussieht.
   gesichtSteht = false;
-  tft.fillRoundRect(DLG_X + 3, DLG_Y + 3, DLG_B, DLG_H, 10, C_GRUND);
   tft.fillRoundRect(DLG_X, DLG_Y, DLG_B, DLG_H, 10, C_ERHOBEN);
-  tft.drawRoundRect(DLG_X, DLG_Y, DLG_B, DLG_H, 10, C_AKZENT);
+  tft.drawRoundRect(DLG_X, DLG_Y, DLG_B, DLG_H, 10, C_LINIE);
 
   tft.setFreeFont(S_GROSS);
   tft.setTextDatum(TC_DATUM);
@@ -1522,21 +1473,21 @@ void updateDialogZeichnen() {
 
   tft.setTextDatum(TL_DATUM);
   tft.drawString(FIRMWARE_VERSION, BREIT / 2 + 4, DLG_Y + 54);
-  tft.setTextColor(C_AKZENT, C_ERHOBEN);
+  tft.setTextColor(C_TEXT, C_ERHOBEN);
   tft.drawString(neuling.version, BREIT / 2 + 4, DLG_Y + 78);
 
-  // Drei Knoepfe nebeneinander. Ja hat Farbe, die anderen nicht: die
-  // haeufigste Antwort soll am leichtesten zu treffen sein.
-  tft.fillRoundRect(DLG_K1, DLG_KY, DLG_KB, DLG_KH, 6, C_AKZENT);
+  // Drei Knoepfe nebeneinander. Ja ist hell gefuellt, die anderen nur
+  // umrandet: die haeufigste Antwort soll am leichtesten zu treffen sein.
+  // Kein Rot, das gehoert dem, was jetzt dran ist.
+  tft.fillRoundRect(DLG_K1, DLG_KY, DLG_KB, DLG_KH, 6, C_TEXT);
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(C_TEXT, C_AKZENT);
+  tft.setTextColor(C_GRUND, C_TEXT);
   tft.drawString("Ja", DLG_K1 + DLG_KB / 2, DLG_KY + DLG_KH / 2);
 
   for (int i = 0; i < 2; i++) {
     const int kx = i == 0 ? DLG_K2 : DLG_K3;
-    tft.fillRoundRect(kx, DLG_KY, DLG_KB, DLG_KH, 6, C_FLAECHE);
     tft.drawRoundRect(kx, DLG_KY, DLG_KB, DLG_KH, 6, C_LINIE);
-    tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
+    tft.setTextColor(C_GEDAEMPFT, C_ERHOBEN);
     tft.drawString(i == 0 ? "Später" : "Nein", kx + DLG_KB / 2, DLG_KY + DLG_KH / 2);
   }
 }
@@ -1547,7 +1498,7 @@ bool istSiebenundsechzig(const char *uhr) {
 }
 
 // Masse des Hinweis-Kastens. Zeichnen und Treffer teilen sich die Zahlen.
-const int HW_X = 20, HW_Y = 48, HW_B = BREIT - 40, HW_H = 128;
+const int HW_X = 20, HW_Y = 36, HW_B = BREIT - 40, HW_H = 156;
 const int HW_KY = HW_Y + HW_H - 46, HW_KH = 34;
 const int HW_KB = (HW_B - 3 * 12) / 2;
 const int HW_K1 = HW_X + 12, HW_K2 = HW_K1 + HW_KB + 12;
@@ -1561,9 +1512,8 @@ const int HW_K1 = HW_X + 12, HW_K2 = HW_K1 + HW_KB + 12;
  */
 void hinweisZeichnen() {
   gesichtSteht = false;
-  tft.fillRoundRect(HW_X + 3, HW_Y + 3, HW_B, HW_H, 10, C_GRUND);
   tft.fillRoundRect(HW_X, HW_Y, HW_B, HW_H, 10, C_ERHOBEN);
-  tft.drawRoundRect(HW_X, HW_Y, HW_B, HW_H, 10, C_KAL_PRIVAT);
+  tft.drawRoundRect(HW_X, HW_Y, HW_B, HW_H, 10, C_LINIE);
 
   tft.setFreeFont(S_KLEIN);
   tft.setTextDatum(TL_DATUM);
@@ -1573,13 +1523,14 @@ void hinweisZeichnen() {
                                             : ""),
                  HW_X + 12, HW_Y + 8);
 
-  // Zwei Zeilen Text, an Wortgrenzen umgebrochen. Was dann noch uebrig
-  // ist, wird abgeschnitten: 120 Zeichen passen fast immer.
+  // Drei Zeilen Text, an Wortgrenzen umgebrochen. Was dann noch uebrig
+  // ist, wird abgeschnitten. Zwei Zeilen reichten nicht: "Soll ich neu
+  // starten?" endete als "Soll ich neu start.".
   tft.setFreeFont(S_FETT);
   tft.setTextColor(C_TEXT, C_ERHOBEN);
   String rest = briefing.hinweisText;
   const int breite = HW_B - 24;
-  for (int zeile = 0; zeile < 2 && rest.length(); zeile++) {
+  for (int zeile = 0; zeile < 3 && rest.length(); zeile++) {
     String teil = rest;
     while (tft.textWidth(teil) > breite) {
       const int leer = teil.lastIndexOf(' ');
@@ -1589,21 +1540,20 @@ void hinweisZeichnen() {
       }
       teil = teil.substring(0, leer);
     }
-    if (zeile == 1 && teil.length() < rest.length())
+    if (zeile == 2 && teil.length() < rest.length())
       teil = passend(rest, breite);
-    tft.drawString(teil, HW_X + 12, HW_Y + 26 + zeile * 24);
+    tft.drawString(teil, HW_X + 12, HW_Y + 26 + zeile * 22);
     rest = teil.length() < rest.length() ? rest.substring(teil.length() + 1) : "";
   }
 
   tft.setFreeFont(S_NORMAL);
-  tft.fillRoundRect(HW_K1, HW_KY, HW_KB, HW_KH, 6, C_KAL_PRIVAT);
+  tft.fillRoundRect(HW_K1, HW_KY, HW_KB, HW_KH, 6, C_TEXT);
   tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(C_TEXT, C_KAL_PRIVAT);
+  tft.setTextColor(C_GRUND, C_TEXT);
   tft.drawString(hinweisKnopf == 1 && hinweisTipps > 1 ? String(hinweisTipps) + "x ok" : "ok",
                  HW_K1 + HW_KB / 2, HW_KY + HW_KH / 2);
-  tft.fillRoundRect(HW_K2, HW_KY, HW_KB, HW_KH, 6, C_FLAECHE);
   tft.drawRoundRect(HW_K2, HW_KY, HW_KB, HW_KH, 6, C_LINIE);
-  tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
+  tft.setTextColor(C_GEDAEMPFT, C_ERHOBEN);
   tft.drawString(hinweisKnopf == 2 && hinweisTipps > 1 ? String(hinweisTipps) + "x später"
                                                        : "später",
                  HW_K2 + HW_KB / 2, HW_KY + HW_KH / 2);
@@ -1690,7 +1640,7 @@ void zugZeichnen() {
   const uint32_t weg = millis() - eier.zugStart;
   const int x = BREIT - (int)(weg / 12);  // 12 ms je Pixel, ~4 s ueber das Bild
   // Im Gesicht-Theme faehrt er unter den Augen durch, nicht durch die Uhr.
-  const int y = gesichtAktiv() ? AUGE_UNTEN + 1 : FUSS_Y - 10;
+  const int y = gesichtAktiv() ? AUGE_UNTEN + 1 : 200;
   // Spur freimachen, wo der Zug gerade war.
   tft.fillRect(x + 22, y, 6, 8, C_GRUND);
   if (x < -30) {
@@ -1792,16 +1742,25 @@ void gesichtSeiteZeichnen() {
   } else {
     satz = "Warte auf die Uhrzeit.";
   }
-  if (briefing.faelligAnzahl > 0 && habenDaten) {
-    if (klein.length())
-      klein += "  ·  ";
-    klein += String(briefing.faelligAnzahl) + " fällig";
-  }
+  // Faelliges steht unten links, nicht mehr in der kleinen Zeile: dort
+  // schnitt es den Satz ab ("... dann Mittagspause · 6.").
   if (millis() < eier.schereBis)
     satz = "ey schere.";
 
-  tft.setTextDatum(TC_DATUM);
+  // Passt der Satz nicht, wandert die Dauer in die kleine Zeile. Sonst
+  // stand da "Mittagspause. Noch 58." und das "min" fehlte.
   tft.setFreeFont(S_GROSS);
+  if (tft.textWidth(satz) > BREIT - 24 && millis() >= eier.schereBis && habenDaten) {
+    if (laeuft) {
+      satz = laeuft->titel + ".";
+      klein = "noch " + alsDauer(laeuft->endeMin - jetztMin) + ", bis " + laeuft->ende;
+    } else if (naechste && !stoerungAktiv()) {
+      satz = naechste->titel + ".";
+      klein = "in " + alsDauer(naechste->beginnMin - jetztMin) + ", um " + naechste->zeit;
+    }
+  }
+
+  tft.setTextDatum(TC_DATUM);
   tft.setTextColor(satzFarbe, C_GRUND);
   tft.drawString(passend(satz, BREIT - 24), BREIT / 2, SATZ_Y);
   tft.setFreeFont(S_NORMAL);
@@ -1813,14 +1772,18 @@ void gesichtSeiteZeichnen() {
   if (zeitDa)
     strftime(uhr, sizeof(uhr), "%H:%M", &jetzt);
   tft.setFreeFont(S_KLEIN);
-  tft.setTextColor(istSiebenundsechzig(uhr) ? C_AKZENT : C_LINIE, C_GRUND);
+  tft.setTextColor(istSiebenundsechzig(uhr) ? C_AKZENT : C_LEISE, C_GRUND);
   tft.drawString(uhr, BREIT / 2, 216);
-  uint16_t punkt = C_FEHLER;
-  if (habenDaten)
-    punkt = (millis() - letzterErfolg) < VERALTET_MS ? C_LINIE : C_ACHTUNG;
-  tft.fillCircle(12, 222, 3, punkt);
+  if (briefing.faelligGesamt > 0 && habenDaten) {
+    tft.setTextDatum(TL_DATUM);
+    tft.setTextColor(C_ACHTUNG, C_GRUND);
+    tft.drawString(String(briefing.faelligGesamt) + " fällig", 12, 216);
+  }
+  // Dunkel heisst in Ordnung: der Punkt oben links nur bei alten Daten.
+  if (!habenDaten || millis() - letzterErfolg >= VERALTET_MS)
+    tft.fillCircle(10, 10, 3, habenDaten ? C_ACHTUNG : C_FEHLER);
   tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(C_LINIE, C_GRUND);
+  tft.setTextColor(C_LEISE, C_GRUND);
   tft.drawString(doah > 0 ? "DOAH " + String(doah) : "", BREIT - 12, 216);
 }
 
@@ -1869,39 +1832,15 @@ void anzeigeZeichnen() {
   default: termineZeichnen(); break;
   }
 
-  // Fusszeile: die eine Zahl, die zaehlt.
-  tft.fillRect(0, FUSS_Y, BREIT, HOCH - FUSS_Y, C_FLAECHE);
-  tft.drawFastHLine(0, FUSS_Y, BREIT, C_LINIE);
-  tft.setFreeFont(S_KLEIN);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
-  tft.drawString("offen", 12, FUSS_Y + 5);
-  tft.setFreeFont(S_NORMAL);
-  tft.setTextColor(briefing.offen > 0 ? C_AKZENT : C_GEDAEMPFT, C_FLAECHE);
-  tft.drawString(String(briefing.offen), 46, FUSS_Y);
-
-  tft.setFreeFont(S_KLEIN);
-  tft.setTextDatum(TC_DATUM);
-  // Sind die Daten alt, steht hier statt des Datums, woran es liegt.
-  if (lage == LAGE_KEIN_TUNNEL) {
-    tft.setTextColor(C_ACHTUNG, C_FLAECHE);
-    tft.drawString("Tunnel weg, Daten alt", BREIT / 2, FUSS_Y + 5);
-  } else if (lage == LAGE_KEIN_SERVER) {
-    tft.setTextColor(C_ACHTUNG, C_FLAECHE);
-    tft.drawString("Mia OS antwortet nicht", BREIT / 2, FUSS_Y + 5);
-  } else if (lage == LAGE_KEIN_WLAN) {
-    tft.setTextColor(C_FEHLER, C_FLAECHE);
-    tft.drawString("kein WLAN", BREIT / 2, FUSS_Y + 5);
-  } else {
-    tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
-    tft.drawString(briefing.datum, BREIT / 2, FUSS_Y + 5);
+  // Keine Fusszeile mehr (0.3): "offen 20" in Rot und das Datum als ISO-
+  // Zeichenkette waren Rauschen. Der Lage-Hinweis steht im Kopf als Punkt,
+  // der Zaehler fuer nichts (Regel 30) klein daneben.
+  if (doah > 0) {
+    tft.setFreeFont(S_KLEIN);
+    tft.setTextDatum(TR_DATUM);
+    tft.setTextColor(C_LEISE, C_GRUND);
+    tft.drawString("DOAH " + String(doah), BREIT - 112, 11);
   }
-
-  // Rechts: der Zaehler fuer nichts. Regel 30. Waechst mit jedem Wisch
-  // gegen die Wand und wird nie erklaert.
-  tft.setTextDatum(TR_DATUM);
-  tft.setTextColor(C_GEDAEMPFT, C_FLAECHE);
-  tft.drawString(doah > 0 ? "DOAH " + String(doah) : "halten: Setup", BREIT - 12, FUSS_Y + 5);
 }
 
 /**
@@ -1994,7 +1933,7 @@ int wischen() {
   if (lag_an && ansicht == 1 && !neuling.gefragt && briefing.hinweiseAnzahl == 0 &&
       millis() - startZeit > 2000) {
     for (int i = 0; i < faelligZeilen; i++) {
-      if (startY >= faelligY[i] - 3 && startY < faelligY[i] + 15) {
+      if (startY >= faelligY[i] - 2 && startY < faelligY[i] + FAELLIG_H) {
         lag_an = false;
         halteZiel = 2;
         halteIndex = i;
@@ -2160,7 +2099,7 @@ int wischen() {
     // Auf der Heute-Seite auf eine Faellig-Zeile: Begrabenes zurueckholen.
     if (ansicht == 1 && briefing.hinweiseAnzahl == 0) {
       for (int i = 0; i < faelligZeilen; i++) {
-        if (startY >= faelligY[i] - 3 && startY < faelligY[i] + 15) {
+        if (startY >= faelligY[i] - 2 && startY < faelligY[i] + FAELLIG_H) {
           faelligTipp = i;
           return 0;
         }

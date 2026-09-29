@@ -15,7 +15,9 @@ extern TFT_eSPI tft;
 // Dieselbe Grundfarbe wie in main.cpp (#0b0c0e). Pupille und Lid sind
 // Grundfarbe, deshalb ist es egal, ob die Pupille an einer Ecke ueber den
 // Rand der Augenform hinausragt: dort ist ohnehin Grund.
-static const uint16_t GRUND = 0x0841;
+#include "farben.h"
+// Derselbe Grund wie die Seite, sonst steht um jedes Auge ein Kasten.
+static const uint16_t GRUND = C_GRUND;
 static const int ECKE = 40;         // Rundung der Augenform
 static const int PUP_B = 26, PUP_H = 30;
 static const int PUP_X = 29, PUP_Y = 33;  // Pupille in Ruhe, linke obere Ecke
@@ -187,7 +189,7 @@ static void zeichnen(bool erzwingen) {
 
   uint16_t farbe = einst.farbe;
   if (schreck)
-    farbe = 0xFCE1;  // C_ACHTUNG, orange
+    farbe = C_ACHTUNG;
   else if (grund == G_MUEDE)
     farbe = gedaempft(einst.farbe);
 
